@@ -17,6 +17,9 @@
 
 #include <cstdio>
 #include <sstream>
+#include <fstream>
+#include <bitset>
+#include "Common/File/FileUtil.h"
 
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
@@ -1223,6 +1226,56 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		}
 		WRITE(p, "  return outfragment;\n");
 	}
+
+	#ifdef __FRAGMENT_GLSL_FILE__
+    // Direktori sama seperti patch
+    std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
+    
+    // Generate flag_value seperti di patch
+    std::bitset<28> flag;
+    flag.reset();
+    // ... set semua flag sesuai kondisi ...
+    unsigned long flag_value = flag.to_ulong();
+    
+    char file_name[128] = {0};
+    snprintf(file_name, sizeof(file_name), "Fragment_0x%lx.glsl", flag_value);
+    std::string out_name = file_name;
+    
+    // Cek apakah file replacement ada
+    std::ifstream glsl_in(dir_path + "/" + out_name);
+    if (glsl_in.is_open()) {
+        // Baca file replacement dan timpa buffer
+        glsl_in.seekg(0, glsl_in.end);
+        int file_size = glsl_in.tellg();
+        glsl_in.seekg(0, glsl_in.beg);
+        
+        if (file_size < 16384) {
+            memset(buffer, 0x20, 16384);
+            glsl_in.read(buffer, file_size);
+            buffer[file_size] = '\0';
+            NOTICE_LOG(G3D, "Replaced fragment shader: %s", file_name);
+        } else {
+            ERROR_LOG(G3D, "Replacement shader too large: %s", file_name);
+        }
+        glsl_in.close();
+    } else {
+        // Jika tidak ada replacement, dump shader yang dihasilkan
+        std::ofstream glsl_out(dir_path + "/" + out_name);
+        if (glsl_out.is_open()) {
+            glsl_out.write(buffer, strlen(buffer));
+            glsl_out.close();
+            NOTICE_LOG(G3D, "Dumped fragment shader: %s", file_name);
+        } else {
+            // Buat direktori jika belum ada
+            File::CreateDir(dir_path);
+            glsl_out.open(dir_path + "/" + out_name);
+            if (glsl_out.is_open()) {
+                glsl_out.write(buffer, strlen(buffer));
+                glsl_out.close();
+            }
+        }
+    }
+#endif
 
 	WRITE(p, "}\n");
 
