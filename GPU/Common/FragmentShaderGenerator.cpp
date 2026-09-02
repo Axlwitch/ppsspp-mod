@@ -1227,7 +1227,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		WRITE(p, "  return outfragment;\n");
 	}
 
-	WRITE(p, "}\n");
+		WRITE(p, "}\n");
 
 	// ===== TULIS FLAG VALUE DAN KOMENTAR DI SHADER (SEPERTI PATCH) =====
 	// HANYA UNTUK OPENGL
@@ -1324,9 +1324,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				memset(buffer, 0x20, 16384);
 				glsl_in.read(buffer, file_size);
 				buffer[file_size] = '\0';
-				NOTICE_LOG(GPU, "REPLACED fragment shader: %s", file_name);
+				NOTICE_LOG(G3D, "REPLACED fragment shader: %s", file_name);
 			} else if (file_size >= 16384) {
-				ERROR_LOG(GPU, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
+				ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
 			}
 			glsl_in.close();
 		} else {
@@ -1335,11 +1335,14 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			if (glsl_out.is_open()) {
 				glsl_out.write(buffer, strlen(buffer));
 				glsl_out.close();
-				// NOTICE_LOG(GPU, "DUMPED fragment shader: %s", file_name);
+				// NOTICE_LOG(G3D, "DUMPED fragment shader: %s", file_name);
 			}
 		}
 #endif
 	}
 
 	return true;
+
+	
 }
+
