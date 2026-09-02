@@ -2,7 +2,6 @@ name: Manual Generate Android APK
 on:
   workflow_dispatch:
     inputs:
-
       buildVariant:
         type: choice
         description: 'Build Variant'
@@ -16,7 +15,6 @@ on:
         - LegacyOptimized
 
 jobs:
-
   apk:
     name: Generate ${{ github.event.inputs.buildVariant }} APK
     runs-on: ubuntu-latest
@@ -33,11 +31,10 @@ jobs:
         run: |
           echo "count=$(git tag -l 'v[0-9]*' | wc -l | tr -d ' ')" >> $GITHUB_OUTPUT
 
-      - name: Fetch upstream tags # required for git describe to return a valid version and to preevnt androidGitVersion from crashing on a new fork
+      - name: Fetch upstream tags
         if: steps.valid-tags.outputs.count == '0'
         run: |
-          # TODO: should try to fetch tags from whereever this repo was forked from before fetching from official repo
-          git remote add upstream https://github.com/hrydgard/ppsspp.git # fetching from official repo as a fallback
+          git remote add upstream https://github.com/hrydgard/ppsspp.git
           git fetch --deepen=15000 --no-recurse-submodules --tags --force upstream || exit 0
         
       - name: Setup JDK
@@ -46,14 +43,6 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
-        
-      #- name: Setup SDK # gradlew will install SDK automatically, thus this step not needed
-      #  uses: android-actions/setup-android@v3
-          
-      #- name: Setup NDK # gradle will install NDK (side by side) automatically, thus explictly seting up NDK here will cause not enough storage issue when building debug variant
-      #  uses: nttld/setup-ndk@v1
-      #  with:
-      #    ndk-version: r21e
 
       - name: Test androidGitVersion
         run: |
@@ -61,21 +50,28 @@ jobs:
           gradle --quiet androidGitVersion
       
       - name: Assemble APK
-        run: ./gradlew assemble${{ github.event.inputs.buildVariant }} --stacktrace
-      
-      #- name: Gradle Test
-      #  run: bash ./gradlew test${{ github.event.inputs.buildVariant }}UnitTest --stacktrace
+        run: |
+          ./gradlew assemble${{ github.event.inputs.buildVariant }} \
+            --stacktrace \
+            --parallel \
+            --max-workers=4 \
+            -x lint \
+            -x bundleRelease \
+            -x testDebug \
+            --build-cache \
+            --daemon
       
       - name: Package build
         run: |
-          find . -name "*.apk"
-          mkdir ppsspp
-          if [ -e android/build/*/apk/*/*/*.apk ]; then
-            cp android/build/*/apk/*/*/*.apk ppsspp/
-          fi
+          mkdir -p ppsspp
+          find android/build -name "*${{ github.event.inputs.buildVariant }}*.apk" -type f -exec cp {} ppsspp/ \;
+          echo "APK files packaged:"
+          ls -lh ppsspp/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: android-${{ github.event.inputs.buildVariant }} build
+          name: android-${{ github.event.inputs.buildVariant }}-apk
           path: ppsspp/
+          retention-days: 30
+          if-no-files-found: error
