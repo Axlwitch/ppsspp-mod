@@ -1227,89 +1227,122 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		WRITE(p, "  return outfragment;\n");
 	}
 
-  WRITE(p, "}\n");
-	  // ===== FITUR DUMP & REPLACE SHADER =====
-// Di akhir GenerateFragmentShader, sebelum return true:
+		WRITE(p, "}\n");
 
+	// ===== TULIS FLAG VALUE DAN KOMENTAR DI SHADER (SEPERTI PATCH) =====
+	// HANYA UNTUK OPENGL
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+		WRITE(p, "\n");
+		WRITE(p, "\n");
+		if (highpFog) WRITE(p, "//    highpFog 0\n");
+		if (enableFragmentTestCache) WRITE(p, "// enableFragmentTestCache 1\n");
+		if (texture3D) WRITE(p, "// texture3D 2\n");
+		if (lmode) WRITE(p, "// lmode 3\n");
+		if (doTexture) WRITE(p, "// doTexture  4\n ");
+		if (enableFog) WRITE(p, "// enableFog  5\n");
+		if (enableAlphaTest) WRITE(p, "// enableAlphaTest   6\n");
+		if (alphaTestAgainstZero) WRITE(p, "// alphaTestAgainstZero    7\n");
+		if (testForceToZero) WRITE(p, "//  testForceToZero   8\n");
+		if (enableColorTest) WRITE(p, "// enableColorTest   9\n");
+		if (colorTestAgainstZero) WRITE(p, "// colorTestAgainstZero   10\n ");
+		if (false) WRITE(p, "// enableColorDoubling    11\n");
+		if (doTextureProjection) WRITE(p, "// doTextureProjection    12\n");
+		if (false) WRITE(p, "// doTextureAlpha    13\n");
+		if (flatBug) WRITE(p, "// flatBug    14  \n");
+		if (doFlatShading) WRITE(p, "// doFlatShading  15 \n");
+		if (shaderDepalMode != ShaderDepalMode::OFF) WRITE(p, "// shaderDepal    16\n");
+		if (shaderDepalMode == ShaderDepalMode::SMOOTHED) WRITE(p, "// smoothedDepal    17\n");
+		if (false) WRITE(p, "// bgraTexture    18\n");
+		if (colorWriteMask) WRITE(p, "// colorWriteMask    19\n");
+		if (needShaderTexClamp) WRITE(p, "// needShaderTexClamp     20\n");
+		if (blueToAlpha) WRITE(p, "// blueToAlpha     21\n");
+		if (isModeClear) WRITE(p, "// isModeClear    22\n");
+		if (useDiscardStencilBugWorkaround) WRITE(p, "// useDiscardStencilBugWorkaround     23\n");
+		if (needFramebufferRead) WRITE(p, "// readFramebuffer    24\n");
+		if (readFramebufferTex) WRITE(p, "// readFramebufferTex     25\n");
+		if (needFragCoord) WRITE(p, "// needFragCoord     26\n");
+		if (writeDepth) WRITE(p, "// writeDepth    27\n");
+		
+		// Generate flag_value
+		std::bitset<28> flag;
+		flag.reset();
+		flag[0] = highpFog;
+		flag[1] = enableFragmentTestCache;
+		flag[2] = texture3D;
+		flag[3] = lmode;
+		flag[4] = doTexture;
+		flag[5] = enableFog;
+		flag[6] = enableAlphaTest;
+		flag[7] = alphaTestAgainstZero;
+		flag[8] = testForceToZero;
+		flag[9] = enableColorTest;
+		flag[10] = colorTestAgainstZero;
+		flag[11] = 0;
+		flag[12] = doTextureProjection;
+		flag[13] = 0;
+		flag[14] = flatBug;
+		flag[15] = doFlatShading;
+		flag[16] = (shaderDepalMode != ShaderDepalMode::OFF);
+		flag[17] = (shaderDepalMode == ShaderDepalMode::SMOOTHED);
+		flag[18] = 0;
+		flag[19] = colorWriteMask;
+		flag[20] = needShaderTexClamp;
+		flag[21] = blueToAlpha;
+		flag[22] = isModeClear;
+		flag[23] = useDiscardStencilBugWorkaround;
+		flag[24] = needFramebufferRead;
+		flag[25] = readFramebufferTex;
+		flag[26] = needFragCoord;
+		flag[27] = writeDepth;
+		
+		unsigned long flag_value = flag.to_ulong();
+		WRITE(p, "//flag_value = 0x%lx \n", flag_value);
+
+		// ===== FITUR DUMP & REPLACE SHADER (HANYA OPENGL) =====
 #ifdef __FRAGMENT_GLSL_FILE__
-    // Direktori penyimpanan shader (sesuai patch)
-    std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
-    
-    // Buat direktori jika belum ada
-    File::CreateDir(dir_path);
-    
-    // Generate flag_value dari kondisi yang ada
-    std::bitset<28> flag;
-    flag.reset();
-    flag[0] = highpFog;
-    flag[1] = enableFragmentTestCache;
-    flag[2] = texture3D;
-    flag[3] = lmode;
-    flag[4] = doTexture;
-    flag[5] = enableFog;
-    flag[6] = enableAlphaTest;
-    flag[7] = alphaTestAgainstZero;
-    flag[8] = testForceToZero;
-    flag[9] = enableColorTest;
-    flag[10] = colorTestAgainstZero;
-    flag[11] = 0; // enableColorDoubling - tidak ada di versi baru
-    flag[12] = doTextureProjection;
-    flag[13] = 0; // doTextureAlpha - tidak ada di versi baru
-    flag[14] = flatBug;
-    flag[15] = doFlatShading;
-    flag[16] = (shaderDepalMode != ShaderDepalMode::OFF);
-    flag[17] = (shaderDepalMode == ShaderDepalMode::SMOOTHED);
-    flag[18] = 0; // bgraTexture - tidak ada di versi baru
-    flag[19] = colorWriteMask;
-    flag[20] = needShaderTexClamp;
-    flag[21] = blueToAlpha;
-    flag[22] = isModeClear;
-    flag[23] = useDiscardStencilBugWorkaround;
-    flag[24] = needFramebufferRead;
-    flag[25] = readFramebufferTex;
-    flag[26] = needFragCoord;
-    flag[27] = writeDepth;
-    
-    unsigned long flag_value = flag.to_ulong();
-    
-    char file_name[128] = {0};
-    snprintf(file_name, sizeof(file_name), "Fragment_0x%lx.glsl", flag_value);
-    std::string out_name = file_name;
-    std::string full_path = dir_path + "/" + out_name;
-    
-    // Cek apakah file replacement ada
-    std::ifstream glsl_in(full_path);
-    if (glsl_in.is_open()) {
-        // Baca file replacement dan timpa buffer
-        glsl_in.seekg(0, glsl_in.end);
-        int file_size = (int)glsl_in.tellg();
-        glsl_in.seekg(0, glsl_in.beg);
-        
-        if (file_size > 0 && file_size < 16384) {
-            memset(buffer, 0x20, 16384);
-            glsl_in.read(buffer, file_size);
-            buffer[file_size] = '\0';
-            NOTICE_LOG(G3D, "Replaced fragment shader: %s", file_name);
-        } else if (file_size >= 16384) {
-            ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
-        }
-        glsl_in.close();
-    } else {
-        // Jika tidak ada replacement, dump shader yang dihasilkan
-        std::ofstream glsl_out(full_path);
-        if (glsl_out.is_open()) {
-            glsl_out.write(buffer, strlen(buffer));
-            glsl_out.close();
-            // NOTICE_LOG(G3D, "Dumped fragment shader: %s", file_name);
-        }
-    }
+		// Direktori penyimpanan shader (sesuai patch)
+		std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
+		
+		// Buat direktori jika belum ada
+		if (!File::Exists(dir_path)) {
+			File::CreateDir(dir_path);
+		}
+		
+		char file_name[128] = {0};
+		snprintf(file_name, sizeof(file_name), "Fragment_0x%lx.glsl", flag_value);
+		std::string full_path = dir_path + "/" + file_name;
+		
+		// Cek apakah file replacement ada
+		std::ifstream glsl_in(full_path.c_str());
+		if (glsl_in.is_open()) {
+			// Baca file replacement dan timpa buffer
+			glsl_in.seekg(0, glsl_in.end);
+			int file_size = (int)glsl_in.tellg();
+			glsl_in.seekg(0, glsl_in.beg);
+			
+			if (file_size > 0 && file_size < 16384) {
+				memset(buffer, 0x20, 16384);
+				glsl_in.read(buffer, file_size);
+				buffer[file_size] = '\0';
+				NOTICE_LOG(G3D, "REPLACED fragment shader: %s", file_name);
+			} else if (file_size >= 16384) {
+				ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
+			}
+			glsl_in.close();
+		} else {
+			// Jika tidak ada replacement, dump shader yang dihasilkan
+			std::ofstream glsl_out(full_path.c_str());
+			if (glsl_out.is_open()) {
+				glsl_out.write(buffer, strlen(buffer));
+				glsl_out.close();
+				// NOTICE_LOG(G3D, "DUMPED fragment shader: %s", file_name);
+			}
+		}
 #endif
-// ===== AKHIR FITUR DUMP & REPLACE SHADER =====
+	}
 
-
-
+	return true;
 
 	
-	return true;
 }
 
