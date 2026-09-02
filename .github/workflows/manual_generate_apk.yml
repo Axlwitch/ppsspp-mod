@@ -1,22 +1,10 @@
-name: Manual Generate Android APK
+Name: Manual Generate Android APK
 on:
   workflow_dispatch:
-    inputs:
-      buildVariant:
-        type: choice
-        description: 'Build Variant'
-        required: true
-        default: 'NormalOptimized'
-        options: 
-        - NormalOptimized
-        - NormalDebug
-        - VROptimized
-        - VRDebug
-        - LegacyOptimized
 
 jobs:
   apk:
-    name: Generate ${{ github.event.inputs.buildVariant }} APK
+    name: Generate NormalOptimized APK
     runs-on: ubuntu-latest
 
     steps:
@@ -44,34 +32,27 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Test androidGitVersion
+      - name: Assemble Single ARM64 APK
         run: |
-          echo "count=${{steps.valid-tags.outputs.count}}"
-          gradle --quiet androidGitVersion
-      
-      - name: Assemble APK
-        run: |
-          ./gradlew assemble${{ github.event.inputs.buildVariant }} \
-            --stacktrace \
+          ./gradlew :android:assembleNormalOptimized \
+            -Pandroid.injected.build.abi.arm64-v8a \
             --parallel \
-            --max-workers=4 \
-            -x lint \
-            -x bundleRelease \
-            -x testDebug \
             --build-cache \
-            --daemon
-      
+            --no-daemon \
+            -x test \
+            -x lint
+
       - name: Package build
         run: |
           mkdir -p ppsspp
-          find android/build -name "*${{ github.event.inputs.buildVariant }}*.apk" -type f -exec cp {} ppsspp/ \;
-          echo "APK files packaged:"
+          find android/build/outputs/apk -name "*.apk" -type f -exec cp {} ppsspp/ \;
+          echo "APK file packaged:"
           ls -lh ppsspp/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: android-${{ github.event.inputs.buildVariant }}-apk
+          name: android-NormalOptimized-arm64-apk
           path: ppsspp/
           retention-days: 30
           if-no-files-found: error
