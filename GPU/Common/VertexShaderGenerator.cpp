@@ -130,7 +130,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	bool hasColor = id.Bit(VS_BIT_HAS_COLOR);
 	bool hasNormal = id.Bit(VS_BIT_HAS_NORMAL) && useHWTransform;
 	bool hasTexcoord = id.Bit(VS_BIT_HAS_TEXCOORD) || !useHWTransform;
-	bool enableFog = id.Bit(VS_BIT_ENABLE_FOG);
 	bool flipNormal = id.Bit(VS_BIT_NORM_REVERSE);
 	int ls0 = id.Bits(VS_BIT_LS0, 2);
 	int ls1 = id.Bits(VS_BIT_LS1, 2);
@@ -890,7 +889,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// NOTE: When changing this test, don't forget to change the test in the fragment shader fallback too.
 
 		// We use clipping, where available, to implement min/max Z.
-		// 1.0 is used to disable the clip plane (should we generate more shaders instead? how costly are tWRITE
+		// 1.0 is used to disable the clip plane (should we generate more shaders instead? how costly are they?)
 
 		// Note: outPos.z need to be multiplied by outPos.w to undo the division, which shouldn't be in effect here.
 		// We should probably store the undivided outPos in a variable.
@@ -968,7 +967,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  return Out;\n");
 	}
 
-			WRITE(p, "}\n");
+		WRITE(p, "}\n");
 
 	// ===== TULIS FLAG VALUE DAN KOMENTAR DI SHADER (SEPERTI PATCH) =====
 	// HANYA UNTUK OPENGL
@@ -1061,9 +1060,9 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				memset(buffer, 0x20, 16384);
 				glsl_in.read(buffer, file_size);
 				buffer[file_size] = '\0';
-				NOTICE_LOG(GPU, "REPLACED vertex shader: %s", file_name);
+				NOTICE_LOG(G3D, "REPLACED vertex shader: %s", file_name);
 			} else if (file_size >= 16384) {
-				ERROR_LOG(GPU, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
+				ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
 			}
 			glsl_in.close();
 		} else {
@@ -1072,7 +1071,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			if (glsl_out.is_open()) {
 				glsl_out.write(buffer, strlen(buffer));
 				glsl_out.close();
-				// NOTICE_LOG(GPU, "DUMPED vertex shader: %s", file_name);
+				// NOTICE_LOG(G3D, "DUMPED vertex shader: %s", file_name);
 			}
 		}
 #endif
