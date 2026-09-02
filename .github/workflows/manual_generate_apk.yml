@@ -1,4 +1,4 @@
-Name: Manual Generate Android APK
+name: Manual Generate Android APK
 on:
   workflow_dispatch:
 
