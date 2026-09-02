@@ -968,50 +968,82 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	}
 	WRITE(p, "}\n");
 
-	#ifdef __VERTEXT_GLSL_FILE__
+// ===== FITUR DUMP & REPLACE SHADER =====
+// Di akhir GenerateVertexShader, sebelum return true:
+
+#ifdef __VERTEXT_GLSL_FILE__
+    // Direktori penyimpanan shader (sesuai patch)
     std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
     
-    // Generate flag_value seperti di patch
+    // Buat direktori jika belum ada
+    File::CreateDir(dir_path);
+    
+    // Generate flag_value dari kondisi yang ada
     std::bitset<26> flag_bits;
     flag_bits.reset();
-    // ... set semua flag sesuai kondisi ...
+    flag_bits[0] = highpFog;
+    flag_bits[1] = highpTexcoord;
+    flag_bits[2] = isModeThrough;
+    flag_bits[3] = lmode;
+    flag_bits[4] = (doTextureTransform || hasTexcoord);
+    flag_bits[5] = doTextureTransform;
+    flag_bits[6] = doShadeMapping;
+    flag_bits[7] = flatBug;
+    flag_bits[8] = 0; // needsZWHack - tidak ada di versi baru
+    flag_bits[9] = doFlatShading;
+    flag_bits[10] = useHWTransform;
+    flag_bits[11] = hasColor;
+    flag_bits[12] = hasNormal;
+    flag_bits[13] = hasTexcoord;
+    flag_bits[14] = enableFog;
+    flag_bits[15] = flipNormal;
+    flag_bits[16] = 0; // enableBones - tidak ada di versi baru
+    flag_bits[17] = enableLighting;
+    flag_bits[18] = 0; // doBezier - tidak ada di versi baru
+    flag_bits[19] = 0; // doSpline - tidak ada di versi baru
+    flag_bits[20] = 0; // hasColorTess - tidak ada di versi baru
+    flag_bits[21] = 0; // hasTexcoordTess - tidak ada di versi baru
+    flag_bits[22] = 0; // hasNormalTess - tidak ada di versi baru
+    flag_bits[23] = 0; // flipNormalTess - tidak ada di versi baru
+    flag_bits[24] = texCoordInVec3;
+    flag_bits[25] = rangeCulling;
+    
     unsigned long flag_value = flag_bits.to_ulong();
     
     char file_name[128] = {0};
     snprintf(file_name, sizeof(file_name), "Vertex_0x%lx.glsl", flag_value);
     std::string out_name = file_name;
+    std::string full_path = dir_path + "/" + out_name;
     
     // Cek apakah file replacement ada
-    std::ifstream glsl_in(dir_path + "/" + out_name);
+    std::ifstream glsl_in(full_path);
     if (glsl_in.is_open()) {
+        // Baca file replacement dan timpa buffer
         glsl_in.seekg(0, glsl_in.end);
-        int file_size = glsl_in.tellg();
+        int file_size = (int)glsl_in.tellg();
         glsl_in.seekg(0, glsl_in.beg);
         
-        if (file_size < 16384) {
+        if (file_size > 0 && file_size < 16384) {
             memset(buffer, 0x20, 16384);
             glsl_in.read(buffer, file_size);
             buffer[file_size] = '\0';
             NOTICE_LOG(G3D, "Replaced vertex shader: %s", file_name);
-        } else {
-            ERROR_LOG(G3D, "Replacement shader too large: %s", file_name);
+        } else if (file_size >= 16384) {
+            ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
         }
         glsl_in.close();
     } else {
-        std::ofstream glsl_out(dir_path + "/" + out_name);
+        // Jika tidak ada replacement, dump shader yang dihasilkan
+        std::ofstream glsl_out(full_path);
         if (glsl_out.is_open()) {
             glsl_out.write(buffer, strlen(buffer));
             glsl_out.close();
-            NOTICE_LOG(G3D, "Dumped vertex shader: %s", file_name);
-        } else {
-            File::CreateDir(dir_path);
-            glsl_out.open(dir_path + "/" + out_name);
-            if (glsl_out.is_open()) {
-                glsl_out.write(buffer, strlen(buffer));
-                glsl_out.close();
-            }
+            // NOTICE_LOG(G3D, "Dumped vertex shader: %s", file_name);
         }
     }
 #endif
+// ===== AKHIR FITUR DUMP & REPLACE SHADER =====
+
+
 	return true;
 }
