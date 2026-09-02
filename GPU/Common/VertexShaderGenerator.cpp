@@ -14,7 +14,9 @@
 
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
-
+#include <fstream>
+#include <bitset>
+#include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/GPU/ShaderWriter.h"
@@ -965,5 +967,51 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  return Out;\n");
 	}
 	WRITE(p, "}\n");
+
+	#ifdef __VERTEXT_GLSL_FILE__
+    std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
+    
+    // Generate flag_value seperti di patch
+    std::bitset<26> flag_bits;
+    flag_bits.reset();
+    // ... set semua flag sesuai kondisi ...
+    unsigned long flag_value = flag_bits.to_ulong();
+    
+    char file_name[128] = {0};
+    snprintf(file_name, sizeof(file_name), "Vertex_0x%lx.glsl", flag_value);
+    std::string out_name = file_name;
+    
+    // Cek apakah file replacement ada
+    std::ifstream glsl_in(dir_path + "/" + out_name);
+    if (glsl_in.is_open()) {
+        glsl_in.seekg(0, glsl_in.end);
+        int file_size = glsl_in.tellg();
+        glsl_in.seekg(0, glsl_in.beg);
+        
+        if (file_size < 16384) {
+            memset(buffer, 0x20, 16384);
+            glsl_in.read(buffer, file_size);
+            buffer[file_size] = '\0';
+            NOTICE_LOG(G3D, "Replaced vertex shader: %s", file_name);
+        } else {
+            ERROR_LOG(G3D, "Replacement shader too large: %s", file_name);
+        }
+        glsl_in.close();
+    } else {
+        std::ofstream glsl_out(dir_path + "/" + out_name);
+        if (glsl_out.is_open()) {
+            glsl_out.write(buffer, strlen(buffer));
+            glsl_out.close();
+            NOTICE_LOG(G3D, "Dumped vertex shader: %s", file_name);
+        } else {
+            File::CreateDir(dir_path);
+            glsl_out.open(dir_path + "/" + out_name);
+            if (glsl_out.is_open()) {
+                glsl_out.write(buffer, strlen(buffer));
+                glsl_out.close();
+            }
+        }
+    }
+#endif
 	return true;
 }
