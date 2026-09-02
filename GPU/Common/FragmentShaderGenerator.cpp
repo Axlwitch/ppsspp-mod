@@ -1227,6 +1227,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		WRITE(p, "  return outfragment;\n");
 	}
 
+  WRITE(p, "}\n");
+
+
 	#ifdef __FRAGMENT_GLSL_FILE__
     // Direktori sama seperti patch
     std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
@@ -1277,8 +1280,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
     }
 #endif
 
-	WRITE(p, "}\n");
-
+	
 	return true;
 }
 
