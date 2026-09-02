@@ -12,6 +12,12 @@ endif()
 enable_language(ASM)
 
 add_compile_definitions(__STDC_CONSTANT_MACROS)
+# ===== AKTIVASI SHADER DUMP & REPLACE =====
+# Aktif untuk semua build type
+add_compile_definitions(__FRAGMENT_GLSL_FILE__)
+add_compile_definitions(__VERTEXT_GLSL_FILE__)
+message("Shader Dump & Replace: ENABLED for all builds")
+# ==========================================
 
 # Include AppleClang and Clang.
 if(${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" OR ${CMAKE_CXX_COMPILER_ID} STREQUAL "AppleClang")
