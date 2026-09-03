@@ -136,9 +136,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 	ShaderDepalMode shaderDepalMode = (ShaderDepalMode)id.Bits(FS_BIT_SHADER_DEPAL_MODE, 2);
 	GEBufferFormat shaderDepalFmt = (GEBufferFormat)(id.Bits(FS_BIT_SHADER_DEPAL_FORMAT, 3));
-	if (texture3D) {
-		shaderDepalMode = ShaderDepalMode::OFF;
-	}
+	if (texture3D || gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
+    shaderDepalMode = ShaderDepalMode::OFF;
+}
 	if (!compat.bitwiseOps && shaderDepalMode != ShaderDepalMode::OFF) {
 		*errorString = "depal requires bitwise ops";
 		return false;
