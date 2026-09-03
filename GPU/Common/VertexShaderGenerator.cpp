@@ -14,9 +14,7 @@
 
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
-#include <fstream>
-#include <bitset>
-#include "Common/File/FileUtil.h"
+
 #include "Common/StringUtils.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/GPU/ShaderWriter.h"
@@ -966,116 +964,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	if (compat.shaderLanguage == HLSL_D3D11) {
 		WRITE(p, "  return Out;\n");
 	}
-
-		WRITE(p, "}\n");
-
-	// ===== TULIS FLAG VALUE DAN KOMENTAR DI SHADER (SEPERTI PATCH) =====
-	// HANYA UNTUK OPENGL
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-		WRITE(p, "\n");
-		WRITE(p, "\n");
-		if (highpFog) WRITE(p, "//    highpFog  0 \n");
-		if (highpTexcoord) WRITE(p, "// highpTexcoord   1 \n");
-		if (isModeThrough) WRITE(p, "//  isModeThrough  2 \n");
-		if (lmode) WRITE(p, "//lmode    3 \n");
-		if (doTextureTransform || hasTexcoord) WRITE(p, "//  doTexture  4 \n");
-		if (doTextureTransform) WRITE(p, "// doTextureTransform  5  \n");
-		if (doShadeMapping) WRITE(p, "// doShadeMapping   6 \n");
-		if (flatBug) WRITE(p, "// flatBug   7 \n");
-		if (false) WRITE(p, "// needsZWHack    8\n");
-		if (doFlatShading) WRITE(p, "//doFlatShading    9 \n");
-		if (useHWTransform) WRITE(p, "// useHWTransform   10 \n");
-		if (hasColor) WRITE(p, "// hasColor   11 \n");
-		if (hasNormal) WRITE(p, "//hasNormal    12 \n");
-		if (hasTexcoord) WRITE(p, "// hasTexcoord   13 \n");
-		if (enableFog) WRITE(p, "//  enableFog  14 \n");
-		if (flipNormal) WRITE(p, "// flipNormal   15 \n");
-		if (false) WRITE(p, "// enableBones   16 \n");
-		if (enableLighting) WRITE(p, "// enableLighting   17 \n");
-		if (false) WRITE(p, "//  doBezier  18 \n");
-		if (false) WRITE(p, "//doSpline    19 \n");
-		if (false) WRITE(p, "// hasColorTess   20 \n");
-		if (false) WRITE(p, "// hasTexcoordTess  21  \n");
-		if (false) WRITE(p, "// hasNormalTess   22 \n");
-		if (false) WRITE(p, "// flipNormalTess   23 \n");
-		if (texCoordInVec3) WRITE(p, "//  texCoordInVec3  24 \n");
-		if (rangeCulling) WRITE(p, "// vertexRangeCulling   25 \n");
-		
-		// Generate flag_value
-		std::bitset<26> flag_bits;
-		flag_bits.reset();
-		flag_bits[0] = highpFog;
-		flag_bits[1] = highpTexcoord;
-		flag_bits[2] = isModeThrough;
-		flag_bits[3] = lmode;
-		flag_bits[4] = (doTextureTransform || hasTexcoord);
-		flag_bits[5] = doTextureTransform;
-		flag_bits[6] = doShadeMapping;
-		flag_bits[7] = flatBug;
-		flag_bits[8] = 0;
-		flag_bits[9] = doFlatShading;
-		flag_bits[10] = useHWTransform;
-		flag_bits[11] = hasColor;
-		flag_bits[12] = hasNormal;
-		flag_bits[13] = hasTexcoord;
-		flag_bits[14] = enableFog;
-		flag_bits[15] = flipNormal;
-		flag_bits[16] = 0;
-		flag_bits[17] = enableLighting;
-		flag_bits[18] = 0;
-		flag_bits[19] = 0;
-		flag_bits[20] = 0;
-		flag_bits[21] = 0;
-		flag_bits[22] = 0;
-		flag_bits[23] = 0;
-		flag_bits[24] = texCoordInVec3;
-		flag_bits[25] = rangeCulling;
-		
-		unsigned long flag_value = flag_bits.to_ulong();
-		WRITE(p, "//flag_value: 0x%lx \n", flag_value);
-
-		// ===== FITUR DUMP & REPLACE SHADER (HANYA OPENGL) =====
-#ifdef __VERTEXT_GLSL_FILE__
-		// Direktori penyimpanan shader (sesuai patch)
-		std::string dir_path = "/storage/emulated/0/Android/data/org.ppsspp.ppsspp/files/glsl";
-		
-		// Buat direktori jika belum ada
-		if (!File::Exists(dir_path)) {
-			File::CreateDir(dir_path);
-		}
-		
-		char file_name[128] = {0};
-		snprintf(file_name, sizeof(file_name), "Vertex_0x%lx.glsl", flag_value);
-		std::string full_path = dir_path + "/" + file_name;
-		
-		// Cek apakah file replacement ada
-		std::ifstream glsl_in(full_path.c_str());
-		if (glsl_in.is_open()) {
-			// Baca file replacement dan timpa buffer
-			glsl_in.seekg(0, glsl_in.end);
-			int file_size = (int)glsl_in.tellg();
-			glsl_in.seekg(0, glsl_in.beg);
-			
-			if (file_size > 0 && file_size < 16384) {
-				memset(buffer, 0x20, 16384);
-				glsl_in.read(buffer, file_size);
-				buffer[file_size] = '\0';
-				NOTICE_LOG(G3D, "REPLACED vertex shader: %s", file_name);
-			} else if (file_size >= 16384) {
-				ERROR_LOG(G3D, "Replacement shader too large: %s (%d bytes)", file_name, file_size);
-			}
-			glsl_in.close();
-		} else {
-			// Jika tidak ada replacement, dump shader yang dihasilkan
-			std::ofstream glsl_out(full_path.c_str());
-			if (glsl_out.is_open()) {
-				glsl_out.write(buffer, strlen(buffer));
-				glsl_out.close();
-				// NOTICE_LOG(G3D, "DUMPED vertex shader: %s", file_name);
-			}
-		}
-#endif
-	}
-
+	WRITE(p, "}\n");
 	return true;
 }
