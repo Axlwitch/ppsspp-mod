@@ -57,6 +57,11 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	bool highpFog = false;
 	bool highpTexcoord = false;
 	bool enableFragmentTestCache = gstate_c.Use(GPU_USE_FRAGMENT_TEST_CACHE);
+	bool isPowerVR = (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC);
+	if (isPowerVR) {
+		highpFog = false;
+		highpTexcoord = false;
+	}
 
 	const bool fsMinmaxDiscard = id.Bit(FS_BIT_MINMAX_DISCARD);
 	const bool fsDepthClamp = id.Bit(FS_BIT_DEPTH_CLAMP);
