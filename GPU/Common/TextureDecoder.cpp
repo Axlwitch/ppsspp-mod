@@ -144,7 +144,7 @@ static u32 QuickTexHashNEON(const void *checkp, u32 size) {
 			"add r0, %1, %2\n"
 
 			// Okay, do the memory hashing.
-			"QuickTexHashNEON_next:\n"
+			"1:\n"
 			"pld [%2, #0xc0]\n"
 			"vldmia %2!, {d16-d23}\n"
 			"vmla.i16 q0, q1, q8\n"
@@ -154,7 +154,7 @@ static u32 QuickTexHashNEON(const void *checkp, u32 size) {
 			"vadd.i32 q0, q0, q10\n"
 			"vadd.i16 q1, q1, q2\n"
 			"veor.i32 q0, q0, q11\n"
-			"blo QuickTexHashNEON_next\n"
+			"blo 1b\n"
 
 			// Now let's get the result.
 			"vadd.i32 q0, q0, q1\n"
