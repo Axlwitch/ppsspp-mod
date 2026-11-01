@@ -12,7 +12,12 @@ if(NOT ANDROID)
 	set(CMAKE_CXX_STANDARD 17)
 	set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
-
+# ===== AKTIVASI SHADER DUMP & REPLACE =====
+# Aktif untuk semua build type
+add_compile_definitions(__FRAGMENT_GLSL_FILE__)
+add_compile_definitions(__VERTEXT_GLSL_FILE__)
+message("Shader Dump & Replace: ENABLED for all builds")
+# ================
 enable_language(ASM)
 
 add_compile_definitions(__STDC_CONSTANT_MACROS)
