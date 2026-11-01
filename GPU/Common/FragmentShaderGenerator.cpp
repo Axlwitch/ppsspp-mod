@@ -44,9 +44,13 @@
 
 #ifdef __FRAGMENT_GLSL_FILE__
 // ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di <memstick>/glsl/Fragment_<hash ID shader>.glsl.
+// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/Fragment_<hash ID shader>.glsl.
 // Kalau file belum ada: hasil generator ditulis ke file (dump).
 // Kalau file ada: isinya menggantikan seluruh kode shader (replace).
+#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
+// Folder dump & replace shader di Android.
+#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
+#endif
 #ifndef GLSL_REPLACE_BUFFER_SIZE
 // Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
 #define GLSL_REPLACE_BUFFER_SIZE 16384
@@ -63,7 +67,11 @@ static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	char name[64];
 	snprintf(name, sizeof(name), "Fragment_%016llx.glsl", (unsigned long long)hash);
 
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
 	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
 	std::string file = (dir / std::string(name)).ToString();
 
 	std::ifstream in(file, std::ios::binary);
