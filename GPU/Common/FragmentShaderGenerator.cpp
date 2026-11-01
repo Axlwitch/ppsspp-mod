@@ -15,9 +15,15 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <string>
 #include <cstdio>
 #include <sstream>
 
+#include "Common/File/FileUtil.h"
+#include "Common/File/Path.h"
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
@@ -35,6 +41,54 @@
 #include "GPU/GPUState.h"
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
+
+#ifdef __FRAGMENT_GLSL_FILE__
+// ---- Shader dump & replace (OpenGL only) ----
+// File shader dibaca/ditulis di <memstick>/glsl/Fragment_<hash ID shader>.glsl.
+// Kalau file belum ada: hasil generator ditulis ke file (dump).
+// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
+#ifndef GLSL_REPLACE_BUFFER_SIZE
+// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
+#define GLSL_REPLACE_BUFFER_SIZE 16384
+#endif
+
+static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
+	// FNV-1a 64-bit atas seluruh byte ID shader.
+	uint64_t hash = 1469598103934665603ULL;
+	const uint8_t *bytes = (const uint8_t *)idData;
+	for (size_t i = 0; i < idSize; i++) {
+		hash ^= bytes[i];
+		hash *= 1099511628211ULL;
+	}
+	char name[64];
+	snprintf(name, sizeof(name), "Fragment_%016llx.glsl", (unsigned long long)hash);
+
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+	std::string file = (dir / std::string(name)).ToString();
+
+	std::ifstream in(file, std::ios::binary);
+	if (in.is_open()) {
+		in.seekg(0, std::ios::end);
+		std::streamoff size = in.tellg();
+		in.seekg(0, std::ios::beg);
+		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
+			std::string code((size_t)size, '\0');
+			in.read(&code[0], size);
+			if (in.gcount() == size) {
+				memcpy(buffer, code.data(), (size_t)size);
+				buffer[size] = '\0';
+			}
+		}
+		return;
+	}
+
+	File::CreateDir(dir);
+	std::ofstream out(file, std::ios::binary);
+	if (out.is_open()) {
+		out.write(buffer, (std::streamsize)strlen(buffer));
+	}
+}
+#endif
 
 static const SamplerDef samplersMono[3] = {
 	{ 0, "tex" },
@@ -1230,6 +1284,12 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	}
 
 	WRITE(p, "}\n");
+
+#ifdef __FRAGMENT_GLSL_FILE__
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+		FsGlslReplace(&id, sizeof(id), buffer);
+	}
+#endif
 
 	return true;
 }
