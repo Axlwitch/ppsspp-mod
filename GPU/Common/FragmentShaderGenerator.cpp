@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <cstdio>
 #include <sstream>
@@ -96,6 +97,23 @@ static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 		out.write(buffer, (std::streamsize)strlen(buffer));
 	}
 }
+
+// Baca file kode custom (satu file untuk SEMUA fragment shader).
+// Isinya disuntik sebelum main() dan fungsi custom_fs(inout vec4 v) dipanggil otomatis.
+// Letak: GLSL_REPLACE_DIR/custom_fs.glsl (atau <memstick>/glsl/custom_fs.glsl).
+static bool ReadCustomGlsl(const char *name, std::string *out) {
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
+	std::ifstream in((dir / std::string(name)).ToString(), std::ios::binary);
+	if (!in.is_open()) {
+		return false;
+	}
+	out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	return !out->empty();
+}
 #endif
 
 static const SamplerDef samplersMono[3] = {
@@ -161,6 +179,15 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			extensions.push_back("#extension GL_ARB_conservative_depth : enable\n");
 		}
 	} 
+
+	// Sistem flag: kode custom hanya aktif di OpenGL dan kalau custom_fs.glsl ada.
+	bool hasCustomFs = false;
+	std::string customFs;
+#ifdef __FRAGMENT_GLSL_FILE__
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+		hasCustomFs = ReadCustomGlsl("custom_fs.glsl", &customFs);
+	}
+#endif
 
 	ShaderWriterFlags flags = ShaderWriterFlags::NONE;
 	if (useStereo) {
@@ -483,6 +510,12 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_fs);
 		}
+		if (hasCustomFs) {
+			// Dikirim oleh VS. v_1 = (worldnormal.xyz, flag), v_2 = (worldpos.xyz, 0).
+			// flag: 1 = model 3D, 2 = dunia, 3 = partikel/2D/UI.
+			WRITE(p, "%s highp vec4 v_1;\n", compat.varying_fs);
+			WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
+		}
 
 		if (!enableFragmentTestCache) {
 			if (enableAlphaTest && !alphaTestAgainstZero) {
@@ -554,6 +587,12 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	// PowerVR needs a custom modulo function. For some reason, this has far higher precision than the builtin one.
 	if ((gl_extensions.bugs & BUG_PVR_SHADER_PRECISION_BAD) && needShaderTexClamp) {
 		WRITE(p, "float mymod(float a, float b) { return a - b * floor(a / b); }\n");
+	}
+
+	// Suntik fungsi custom (spekular, emisif, dll) tepat sebelum main().
+	if (hasCustomFs) {
+		p.C(customFs.c_str());
+		p.C("\n");
 	}
 
 	if (compat.shaderLanguage == HLSL_D3D11) {
@@ -927,6 +966,11 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		} else {
 			// No texture mapping
 			WRITE(p, "  vec4 v = v_color0%s;\n", secondary);
+		}
+
+		// Hook custom: warna v sudah final (tekstur + secondary), sebelum fog dan alpha/color test.
+		if (hasCustomFs) {
+			WRITE(p, "  custom_fs(v);\n");
 		}
 
 		if (enableFog) {

@@ -196,6 +196,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	bool enableLighting = id.Bit(VS_BIT_LIGHTING_ENABLE);
 	int matUpdate = id.Bits(VS_BIT_MATERIAL_UPDATE, 3);
 
+	// Jenis objek, dikirim ke semua FS lewat v_1.w (OpenGL saja):
+	// 1 = model 3D (HW transform + punya normal), 2 = dunia (HW transform tanpa normal),
+	// 3 = partikel / 2D / UI / through mode.
+	int objFlag = 3;
+	if (useHWTransform && !isModeThrough)
+		objFlag = hasNormal ? 1 : 2;
+
 	bool lightUberShader = id.Bit(VS_BIT_LIGHT_UBERSHADER) && enableLighting;  // checking lighting here for the shader test's benefit, in reality if ubershader is set, lighting is set.
 	if (lightUberShader && !compat.bitwiseOps) {
 		*errorString = "Light ubershader requires bitwise ops in shader language";
@@ -483,6 +490,11 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_vs);
 		}
+
+		// Varying custom untuk sistem flag. v_1 = (worldnormal.xyz, flag), v_2 = (worldpos.xyz, 0).
+		// Tambah v_3 dst di sini dan di FS kalau perlu.
+		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_vs);
+		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_vs);
 	}
 
 	if (useHWTransform) {
@@ -537,6 +549,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  %sv_color1 = color1;\n", compat.vsOutPrefix);
 		}
 		WRITE(p, "  %sv_fogdepth = fog;\n", compat.vsOutPrefix);
+		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+			WRITE(p, "  %sv_1 = vec4(0.0, 0.0, 1.0, %d.0);\n", compat.vsOutPrefix, objFlag);
+			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
+		}
 
 		// If non-through, the viewport has already been applied here.
 		WRITE(p, "  vec4 outPos = position;\n");
@@ -554,6 +570,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 
 		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
+		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+			WRITE(p, "  %sv_1 = vec4(worldnormal, %d.0);\n", compat.vsOutPrefix, objFlag);
+			WRITE(p, "  %sv_2 = vec4(worldpos, 0.0);\n", compat.vsOutPrefix);
+		}
 		if (useSimpleStereo) {
 			float ipd = 0.065f;
 			float scale = 1.0f;
