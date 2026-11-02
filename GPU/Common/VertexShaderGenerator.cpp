@@ -18,7 +18,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iterator>
+#include <map>
+#include <mutex>
 #include <string>
 #include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
@@ -41,7 +42,7 @@
 
 #ifdef __VERTEXT_GLSL_FILE__
 // ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/Vertex_<hash ID shader>.glsl.
+// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/vs001.glsl, vs002.glsl, dst (nomor urut).
 // Kalau file belum ada: hasil generator ditulis ke file (dump).
 // Kalau file ada: isinya menggantikan seluruh kode shader (replace).
 #if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
@@ -53,6 +54,42 @@
 #define GLSL_REPLACE_BUFFER_SIZE 16384
 #endif
 
+// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/vs_index.txt
+// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
+// Jangan hapus vs_index.txt tanpa menghapus semua vs*.glsl, karena nomornya akan berubah.
+static int VsGlslIndex(uint64_t hash, const Path &dir) {
+	static std::mutex mtx;
+	static bool loaded = false;
+	static std::map<uint64_t, int> indexOf;
+	static int nextIndex = 1;
+	std::lock_guard<std::mutex> lock(mtx);
+	const std::string mapFile = (dir / std::string("vs_index.txt")).ToString();
+	if (!loaded) {
+		loaded = true;
+		std::ifstream in(mapFile);
+		unsigned long long h = 0;
+		int idx = 0;
+		while (in >> std::hex >> h >> std::dec >> idx) {
+			indexOf[(uint64_t)h] = idx;
+			if (idx >= nextIndex) {
+				nextIndex = idx + 1;
+			}
+		}
+	}
+	auto it = indexOf.find(hash);
+	if (it != indexOf.end()) {
+		return it->second;
+	}
+	const int idx = nextIndex++;
+	indexOf[hash] = idx;
+	File::CreateDir(dir);
+	std::ofstream out(mapFile, std::ios::app);
+	if (out.is_open()) {
+		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
+	}
+	return idx;
+}
+
 static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	// FNV-1a 64-bit atas seluruh byte ID shader.
 	uint64_t hash = 1469598103934665603ULL;
@@ -62,13 +99,14 @@ static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 		hash *= 1099511628211ULL;
 	}
 	char name[64];
-	snprintf(name, sizeof(name), "Vertex_%016llx.glsl", (unsigned long long)hash);
 
 #ifdef GLSL_REPLACE_DIR
 	Path dir = Path(std::string(GLSL_REPLACE_DIR));
 #else
 	Path dir = g_Config.memStickDirectory / std::string("glsl");
 #endif
+	// Nama: vs001.glsl, vs002.glsl, ... (nomor urut tetap dari vs_index.txt).
+	snprintf(name, sizeof(name), "vs%03d.glsl", VsGlslIndex(hash, dir));
 	std::string file = (dir / std::string(name)).ToString();
 
 	std::ifstream in(file, std::ios::binary);
@@ -92,34 +130,6 @@ static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	if (out.is_open()) {
 		out.write(buffer, (std::streamsize)strlen(buffer));
 	}
-}
-
-// Baca file kode custom. Urutan pencarian:
-//  1) <glsl>/<nama file game tanpa ekstensi>/<name>   (khusus satu game)
-//  2) <glsl>/<name>                                    (umum, semua game)
-static bool ReadCustomGlsl(const char *name, std::string *out) {
-#ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
-#else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
-#endif
-	auto tryRead = [&](const Path &file) -> bool {
-		std::ifstream in(file.ToString(), std::ios::binary);
-		if (!in.is_open()) {
-			return false;
-		}
-		out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-		return !out->empty();
-	};
-	std::string game = PSP_CoreParameter().fileToStart.GetFilename();
-	size_t dot = game.rfind('.');
-	if (dot != std::string::npos) {
-		game.resize(dot);
-	}
-	if (!game.empty() && tryRead(dir / game / std::string(name))) {
-		return true;
-	}
-	return tryRead(dir / std::string(name));
 }
 #endif
 
@@ -198,17 +208,19 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		extensions.push_back("#extension GL_EXT_multiview : enable");
 	}
 
-	// Hook VS custom (OpenGL + hardware transform saja). Fungsi custom_vs() dipanggil di cabang HW.
-	bool hasCustomVs = false;
-	std::string customVs;
-#ifdef __VERTEXT_GLSL_FILE__
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage) && useHWTransform) {
-		hasCustomVs = ReadCustomGlsl("custom_vs.glsl", &customVs);
-	}
-#endif
-
 	ShaderWriter p(buffer, compat, ShaderStage::Vertex, extensions);
 
+	{
+		// Penanda jenis shader supaya dump gampang dikenali (hanya komentar, tidak mengubah render).
+		// MODEL = hardware transform dan punya normal (karakter dll), DUNIA = hardware transform
+		// tanpa normal (bangunan/tanah), LAIN = software transform / through mode (partikel, 2D, UI).
+		const bool vsHwNotThrough = useHWTransform && !isModeThrough;
+		const char *vsKind = "LAIN (partikel/2D/UI)";
+		if (vsHwNotThrough) {
+			vsKind = id.Bit(VS_BIT_HAS_NORMAL) ? "MODEL" : "DUNIA";
+		}
+		WRITE(p, "// [%s]\n", vsKind);
+	}
 	p.C("// %").W(id.Description()).endl();
 
 	bool lmode = id.Bit(VS_BIT_LMODE);
@@ -233,13 +245,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	int ls1 = id.Bits(VS_BIT_LS1, 2);
 	bool enableLighting = id.Bit(VS_BIT_LIGHTING_ENABLE);
 	int matUpdate = id.Bits(VS_BIT_MATERIAL_UPDATE, 3);
-
-	// Jenis objek, dikirim ke semua FS lewat v_1.w (OpenGL saja):
-	// 1 = model 3D (HW transform + punya normal), 2 = dunia (HW transform tanpa normal),
-	// 3 = partikel / 2D / UI / through mode.
-	int objFlag = 3;
-	if (useHWTransform && !isModeThrough)
-		objFlag = hasNormal ? 1 : 2;
 
 	bool lightUberShader = id.Bit(VS_BIT_LIGHT_UBERSHADER) && enableLighting;  // checking lighting here for the shader test's benefit, in reality if ubershader is set, lighting is set.
 	if (lightUberShader && !compat.bitwiseOps) {
@@ -529,10 +534,9 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_vs);
 		}
 
-		// Varying custom untuk sistem flag:
-		//  v_1 = (normal view space, flag)   v_2 = (posisi view space, 0)
-		//  v_3 = (posisi dunia, 0)           v_4 = (normal dunia, 0)
-		// Isinya bisa diubah per game lewat custom_vs.glsl atau dump VS.
+		// Varying bebas v_1..v_4 (highp vec4). Default 0 dan tidak mengubah render apa pun.
+		// Isi dan pakai sesukamu dengan mengedit dump vs_*.glsl dan fs_*.glsl secara manual
+		// (misalnya v_1 = vec4(worldnormal, 1.0) sebagai flag, v_2 = vec4(worldpos, 0.0), dst).
 		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_vs);
 		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_vs);
 		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_vs);
@@ -544,11 +548,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "   float len2 = dot(v, v);\n");
 		WRITE(p, "   return len2 == 0.0 ? vec3(0.0, 0.0, 1.0) : (v * inversesqrt(len2));\n");
 		WRITE(p, "}\n");
-	}
-
-	// Suntik fungsi custom_vs() tepat sebelum main() (setelah normalizeOr001, supaya bisa dipakai).
-	if (hasCustomVs) {
-		WRITE(p, "%s\n", customVs.c_str());
 	}
 
 	if (ShaderLanguageIsOpenGL(compat.shaderLanguage) || compat.shaderLanguage == GLSL_VULKAN) {
@@ -597,7 +596,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		WRITE(p, "  %sv_fogdepth = fog;\n", compat.vsOutPrefix);
 		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			WRITE(p, "  %sv_1 = vec4(0.0, 0.0, 1.0, %d.0);\n", compat.vsOutPrefix, objFlag);
+			WRITE(p, "  %sv_1 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
@@ -620,29 +619,12 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
 		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			// View space dengan sumbu X dibalik, supaya efek (spekular, rim, dll) mengikuti
-			// putaran kamera dengan benar (game seperti Monster Hunter yang kameranya bisa diputar).
-			WRITE(p, "  mat4 flipY = mat4(\n");
-			WRITE(p, "    -1.0, 0.0, 0.0, 0.0,\n");
-			WRITE(p, "     0.0, 1.0, 0.0, 0.0,\n");
-			WRITE(p, "     0.0, 0.0, 1.0, 0.0,\n");
-			WRITE(p, "     0.0, 0.0, 0.0, 1.0\n");
-			WRITE(p, "  );\n");
-			WRITE(p, "  mat4 u_view_flippedY = u_view * flipY;\n");
-			WRITE(p, "  vec3 viewNormal = normalizeOr001(mul(vec4(worldnormal, 0.0), u_view_flippedY).xyz);\n");
-			WRITE(p, "  vec3 viewPosFlipped = mul(vec4(worldpos, 1.0), u_view_flippedY).xyz;\n");
-			WRITE(p, "  vec4 cv1 = vec4(viewNormal, %d.0);\n", objFlag);
-			WRITE(p, "  vec4 cv2 = vec4(viewPosFlipped, 0.0);\n");
-			WRITE(p, "  vec4 cv3 = vec4(worldpos, 0.0);\n");
-			WRITE(p, "  vec4 cv4 = vec4(worldnormal, 0.0);\n");
-			if (hasCustomVs) {
-				// Per game: boleh mengubah cv1..cv4 (termasuk flag di cv1.w).
-				WRITE(p, "  custom_vs(cv1, cv2, cv3, cv4, worldpos, worldnormal, viewPos, %d.0);\n", objFlag);
-			}
-			WRITE(p, "  %sv_1 = cv1;\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_2 = cv2;\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_3 = cv3;\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_4 = cv4;\n", compat.vsOutPrefix);
+			// v_1..v_4 bebas, default 0. Isi manual di dump vs_*.glsl. Di sini sudah tersedia
+			// worldpos, worldnormal, viewPos, position, u_world, u_view, u_proj.
+			WRITE(p, "  %sv_1 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
 		}
 		if (useSimpleStereo) {
 			float ipd = 0.065f;

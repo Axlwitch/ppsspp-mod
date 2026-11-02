@@ -18,7 +18,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iterator>
+#include <map>
+#include <mutex>
 #include <string>
 #include <cstdio>
 #include <sstream>
@@ -45,7 +46,7 @@
 
 #ifdef __FRAGMENT_GLSL_FILE__
 // ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/Fragment_<hash ID shader>.glsl.
+// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/fs001.glsl, fs002.glsl, dst (nomor urut).
 // Kalau file belum ada: hasil generator ditulis ke file (dump).
 // Kalau file ada: isinya menggantikan seluruh kode shader (replace).
 #if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
@@ -57,6 +58,42 @@
 #define GLSL_REPLACE_BUFFER_SIZE 16384
 #endif
 
+// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/fs_index.txt
+// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
+// Jangan hapus fs_index.txt tanpa menghapus semua fs*.glsl, karena nomornya akan berubah.
+static int FsGlslIndex(uint64_t hash, const Path &dir) {
+	static std::mutex mtx;
+	static bool loaded = false;
+	static std::map<uint64_t, int> indexOf;
+	static int nextIndex = 1;
+	std::lock_guard<std::mutex> lock(mtx);
+	const std::string mapFile = (dir / std::string("fs_index.txt")).ToString();
+	if (!loaded) {
+		loaded = true;
+		std::ifstream in(mapFile);
+		unsigned long long h = 0;
+		int idx = 0;
+		while (in >> std::hex >> h >> std::dec >> idx) {
+			indexOf[(uint64_t)h] = idx;
+			if (idx >= nextIndex) {
+				nextIndex = idx + 1;
+			}
+		}
+	}
+	auto it = indexOf.find(hash);
+	if (it != indexOf.end()) {
+		return it->second;
+	}
+	const int idx = nextIndex++;
+	indexOf[hash] = idx;
+	File::CreateDir(dir);
+	std::ofstream out(mapFile, std::ios::app);
+	if (out.is_open()) {
+		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
+	}
+	return idx;
+}
+
 static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	// FNV-1a 64-bit atas seluruh byte ID shader.
 	uint64_t hash = 1469598103934665603ULL;
@@ -66,13 +103,14 @@ static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 		hash *= 1099511628211ULL;
 	}
 	char name[64];
-	snprintf(name, sizeof(name), "Fragment_%016llx.glsl", (unsigned long long)hash);
 
 #ifdef GLSL_REPLACE_DIR
 	Path dir = Path(std::string(GLSL_REPLACE_DIR));
 #else
 	Path dir = g_Config.memStickDirectory / std::string("glsl");
 #endif
+	// Nama: fs001.glsl, fs002.glsl, ... (nomor urut tetap dari fs_index.txt).
+	snprintf(name, sizeof(name), "fs%03d.glsl", FsGlslIndex(hash, dir));
 	std::string file = (dir / std::string(name)).ToString();
 
 	std::ifstream in(file, std::ios::binary);
@@ -96,35 +134,6 @@ static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	if (out.is_open()) {
 		out.write(buffer, (std::streamsize)strlen(buffer));
 	}
-}
-
-// Baca file kode custom (satu file untuk SEMUA fragment shader).
-// Isinya disuntik sebelum main() dan fungsi custom_fs(inout vec4 v) dipanggil otomatis.
-// Letak: GLSL_REPLACE_DIR/custom_fs.glsl (atau <memstick>/glsl/custom_fs.glsl).
-static bool ReadCustomGlsl(const char *name, std::string *out) {
-#ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
-#else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
-#endif
-	auto tryRead = [&](const Path &file) -> bool {
-		std::ifstream in(file.ToString(), std::ios::binary);
-		if (!in.is_open()) {
-			return false;
-		}
-		out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-		return !out->empty();
-	};
-	// Urutan: 1) <glsl>/<nama file game tanpa ekstensi>/<name>  2) <glsl>/<name>
-	std::string game = PSP_CoreParameter().fileToStart.GetFilename();
-	size_t dot = game.rfind('.');
-	if (dot != std::string::npos) {
-		game.resize(dot);
-	}
-	if (!game.empty() && tryRead(dir / game / std::string(name))) {
-		return true;
-	}
-	return tryRead(dir / std::string(name));
 }
 #endif
 
@@ -191,15 +200,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			extensions.push_back("#extension GL_ARB_conservative_depth : enable\n");
 		}
 	} 
-
-	// Sistem flag: kode custom hanya aktif di OpenGL dan kalau custom_fs.glsl ada.
-	bool hasCustomFs = false;
-	std::string customFs;
-#ifdef __FRAGMENT_GLSL_FILE__
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-		hasCustomFs = ReadCustomGlsl("custom_fs.glsl", &customFs);
-	}
-#endif
 
 	ShaderWriterFlags flags = ShaderWriterFlags::NONE;
 	if (useStereo) {
@@ -522,16 +522,12 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_fs);
 		}
-		if (hasCustomFs) {
-			// Dikirim oleh VS:
-			//  v_1 = (normal view space, flag)   v_2 = (posisi view space, 0)
-			//  v_3 = (posisi dunia, 0)           v_4 = (normal dunia, 0)
-			// flag: 1 = model 3D, 2 = dunia, 3 = partikel/2D/UI.
-			WRITE(p, "%s highp vec4 v_1;\n", compat.varying_fs);
-			WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
-			WRITE(p, "%s highp vec4 v_3;\n", compat.varying_fs);
-			WRITE(p, "%s highp vec4 v_4;\n", compat.varying_fs);
-		}
+		// Varying bebas v_1..v_4 (highp vec4), dikirim oleh VS. Default 0 dan tidak mengubah render.
+		// Isi dari vs_*.glsl, dipakai di fs_*.glsl, keduanya diedit manual.
+		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_fs);
+		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
+		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_fs);
+		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_fs);
 
 		if (!enableFragmentTestCache) {
 			if (enableAlphaTest && !alphaTestAgainstZero) {
@@ -603,18 +599,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	// PowerVR needs a custom modulo function. For some reason, this has far higher precision than the builtin one.
 	if ((gl_extensions.bugs & BUG_PVR_SHADER_PRECISION_BAD) && needShaderTexClamp) {
 		WRITE(p, "float mymod(float a, float b) { return a - b * floor(a / b); }\n");
-	}
-
-	// Suntik fungsi custom (spekular, emisif, dll) tepat sebelum main().
-	if (hasCustomFs) {
-		// Penanda untuk custom_fs.glsl: `tex` (sampler2D) dan v_texcoord hanya ada kalau shader bertekstur.
-		// Tidak aktif untuk depal: di sana `tex` berisi indeks palet, bukan warna.
-		if (doTexture && !texture3D && !arrayTexture && shaderDepalMode == ShaderDepalMode::OFF) {
-			WRITE(p, "#define FS_HAS_TEX\n");
-			// Sampling yang aman lintas versi GLSL: SAMPLE_TEX(uv).
-			WRITE(p, "#define SAMPLE_TEX(uv) %s(tex, uv)\n", compat.texture);
-		}
-		WRITE(p, "%s\n", customFs.c_str());
 	}
 
 	if (compat.shaderLanguage == HLSL_D3D11) {
@@ -988,11 +972,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		} else {
 			// No texture mapping
 			WRITE(p, "  vec4 v = v_color0%s;\n", secondary);
-		}
-
-		// Hook custom: warna v sudah final (tekstur + secondary), sebelum fog dan alpha/color test.
-		if (hasCustomFs) {
-			WRITE(p, "  custom_fs(v);\n");
 		}
 
 		if (enableFog) {
