@@ -591,8 +591,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 	// Suntik fungsi custom (spekular, emisif, dll) tepat sebelum main().
 	if (hasCustomFs) {
-		p.C(customFs.c_str());
-		p.C("\n");
+		WRITE(p, "%s\n", customFs.c_str());
 	}
 
 	if (compat.shaderLanguage == HLSL_D3D11) {
