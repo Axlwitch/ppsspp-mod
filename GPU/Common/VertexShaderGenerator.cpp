@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
@@ -91,6 +92,34 @@ static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
 	if (out.is_open()) {
 		out.write(buffer, (std::streamsize)strlen(buffer));
 	}
+}
+
+// Baca file kode custom. Urutan pencarian:
+//  1) <glsl>/<nama file game tanpa ekstensi>/<name>   (khusus satu game)
+//  2) <glsl>/<name>                                    (umum, semua game)
+static bool ReadCustomGlsl(const char *name, std::string *out) {
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
+	auto tryRead = [&](const Path &file) -> bool {
+		std::ifstream in(file.ToString(), std::ios::binary);
+		if (!in.is_open()) {
+			return false;
+		}
+		out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		return !out->empty();
+	};
+	std::string game = PSP_CoreParameter().fileToStart.GetFilename();
+	size_t dot = game.rfind('.');
+	if (dot != std::string::npos) {
+		game.resize(dot);
+	}
+	if (!game.empty() && tryRead(dir / game / std::string(name))) {
+		return true;
+	}
+	return tryRead(dir / std::string(name));
 }
 #endif
 
@@ -168,6 +197,15 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		extensions.push_back("#extension GL_EXT_multiview : enable");
 	}
+
+	// Hook VS custom (OpenGL + hardware transform saja). Fungsi custom_vs() dipanggil di cabang HW.
+	bool hasCustomVs = false;
+	std::string customVs;
+#ifdef __VERTEXT_GLSL_FILE__
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage) && useHWTransform) {
+		hasCustomVs = ReadCustomGlsl("custom_vs.glsl", &customVs);
+	}
+#endif
 
 	ShaderWriter p(buffer, compat, ShaderStage::Vertex, extensions);
 
@@ -491,10 +529,14 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_vs);
 		}
 
-		// Varying custom untuk sistem flag. v_1 = (worldnormal.xyz, flag), v_2 = (worldpos.xyz, 0).
-		// Tambah v_3 dst di sini dan di FS kalau perlu.
+		// Varying custom untuk sistem flag:
+		//  v_1 = (normal view space, flag)   v_2 = (posisi view space, 0)
+		//  v_3 = (posisi dunia, 0)           v_4 = (normal dunia, 0)
+		// Isinya bisa diubah per game lewat custom_vs.glsl atau dump VS.
 		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_vs);
 		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_vs);
+		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_vs);
+		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_vs);
 	}
 
 	if (useHWTransform) {
@@ -502,6 +544,11 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "   float len2 = dot(v, v);\n");
 		WRITE(p, "   return len2 == 0.0 ? vec3(0.0, 0.0, 1.0) : (v * inversesqrt(len2));\n");
 		WRITE(p, "}\n");
+	}
+
+	// Suntik fungsi custom_vs() tepat sebelum main() (setelah normalizeOr001, supaya bisa dipakai).
+	if (hasCustomVs) {
+		WRITE(p, "%s\n", customVs.c_str());
 	}
 
 	if (ShaderLanguageIsOpenGL(compat.shaderLanguage) || compat.shaderLanguage == GLSL_VULKAN) {
@@ -552,6 +599,8 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
 			WRITE(p, "  %sv_1 = vec4(0.0, 0.0, 1.0, %d.0);\n", compat.vsOutPrefix, objFlag);
 			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
 		}
 
 		// If non-through, the viewport has already been applied here.
@@ -571,8 +620,29 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
 		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			WRITE(p, "  %sv_1 = vec4(worldnormal, %d.0);\n", compat.vsOutPrefix, objFlag);
-			WRITE(p, "  %sv_2 = vec4(worldpos, 0.0);\n", compat.vsOutPrefix);
+			// View space dengan sumbu X dibalik, supaya efek (spekular, rim, dll) mengikuti
+			// putaran kamera dengan benar (game seperti Monster Hunter yang kameranya bisa diputar).
+			WRITE(p, "  mat4 flipY = mat4(\n");
+			WRITE(p, "    -1.0, 0.0, 0.0, 0.0,\n");
+			WRITE(p, "     0.0, 1.0, 0.0, 0.0,\n");
+			WRITE(p, "     0.0, 0.0, 1.0, 0.0,\n");
+			WRITE(p, "     0.0, 0.0, 0.0, 1.0\n");
+			WRITE(p, "  );\n");
+			WRITE(p, "  mat4 u_view_flippedY = u_view * flipY;\n");
+			WRITE(p, "  vec3 viewNormal = normalizeOr001(mul(vec4(worldnormal, 0.0), u_view_flippedY).xyz);\n");
+			WRITE(p, "  vec3 viewPosFlipped = mul(vec4(worldpos, 1.0), u_view_flippedY).xyz;\n");
+			WRITE(p, "  vec4 cv1 = vec4(viewNormal, %d.0);\n", objFlag);
+			WRITE(p, "  vec4 cv2 = vec4(viewPosFlipped, 0.0);\n");
+			WRITE(p, "  vec4 cv3 = vec4(worldpos, 0.0);\n");
+			WRITE(p, "  vec4 cv4 = vec4(worldnormal, 0.0);\n");
+			if (hasCustomVs) {
+				// Per game: boleh mengubah cv1..cv4 (termasuk flag di cv1.w).
+				WRITE(p, "  custom_vs(cv1, cv2, cv3, cv4, worldpos, worldnormal, viewPos, %d.0);\n", objFlag);
+			}
+			WRITE(p, "  %sv_1 = cv1;\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_2 = cv2;\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_3 = cv3;\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_4 = cv4;\n", compat.vsOutPrefix);
 		}
 		if (useSimpleStereo) {
 			float ipd = 0.065f;

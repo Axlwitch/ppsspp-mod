@@ -107,12 +107,24 @@ static bool ReadCustomGlsl(const char *name, std::string *out) {
 #else
 	Path dir = g_Config.memStickDirectory / std::string("glsl");
 #endif
-	std::ifstream in((dir / std::string(name)).ToString(), std::ios::binary);
-	if (!in.is_open()) {
-		return false;
+	auto tryRead = [&](const Path &file) -> bool {
+		std::ifstream in(file.ToString(), std::ios::binary);
+		if (!in.is_open()) {
+			return false;
+		}
+		out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		return !out->empty();
+	};
+	// Urutan: 1) <glsl>/<nama file game tanpa ekstensi>/<name>  2) <glsl>/<name>
+	std::string game = PSP_CoreParameter().fileToStart.GetFilename();
+	size_t dot = game.rfind('.');
+	if (dot != std::string::npos) {
+		game.resize(dot);
 	}
-	out->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-	return !out->empty();
+	if (!game.empty() && tryRead(dir / game / std::string(name))) {
+		return true;
+	}
+	return tryRead(dir / std::string(name));
 }
 #endif
 
@@ -511,10 +523,14 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_fs);
 		}
 		if (hasCustomFs) {
-			// Dikirim oleh VS. v_1 = (worldnormal.xyz, flag), v_2 = (worldpos.xyz, 0).
+			// Dikirim oleh VS:
+			//  v_1 = (normal view space, flag)   v_2 = (posisi view space, 0)
+			//  v_3 = (posisi dunia, 0)           v_4 = (normal dunia, 0)
 			// flag: 1 = model 3D, 2 = dunia, 3 = partikel/2D/UI.
 			WRITE(p, "%s highp vec4 v_1;\n", compat.varying_fs);
 			WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
+			WRITE(p, "%s highp vec4 v_3;\n", compat.varying_fs);
+			WRITE(p, "%s highp vec4 v_4;\n", compat.varying_fs);
 		}
 
 		if (!enableFragmentTestCache) {
@@ -591,6 +607,13 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 	// Suntik fungsi custom (spekular, emisif, dll) tepat sebelum main().
 	if (hasCustomFs) {
+		// Penanda untuk custom_fs.glsl: `tex` (sampler2D) dan v_texcoord hanya ada kalau shader bertekstur.
+		// Tidak aktif untuk depal: di sana `tex` berisi indeks palet, bukan warna.
+		if (doTexture && !texture3D && !arrayTexture && shaderDepalMode == ShaderDepalMode::OFF) {
+			WRITE(p, "#define FS_HAS_TEX\n");
+			// Sampling yang aman lintas versi GLSL: SAMPLE_TEX(uv).
+			WRITE(p, "#define SAMPLE_TEX(uv) %s(tex, uv)\n", compat.texture);
+		}
 		WRITE(p, "%s\n", customFs.c_str());
 	}
 
