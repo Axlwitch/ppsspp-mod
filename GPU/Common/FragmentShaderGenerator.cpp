@@ -528,6 +528,10 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
 		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_fs);
 		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_fs);
+		if (compat.glslES30) {
+			// Harus identik dengan VS: flat in mediump int. Jangan pakai variabel `shading` di sini.
+			WRITE(p, "flat %s mediump int flag;\n", compat.varying_fs);
+		}
 
 		if (!enableFragmentTestCache) {
 			if (enableAlphaTest && !alphaTestAgainstZero) {

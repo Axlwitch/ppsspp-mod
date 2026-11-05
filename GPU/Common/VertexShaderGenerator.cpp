@@ -244,6 +244,15 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	int ls0 = id.Bits(VS_BIT_LS0, 2);
 	int ls1 = id.Bits(VS_BIT_LS1, 2);
 	bool enableLighting = id.Bit(VS_BIT_LIGHTING_ENABLE);
+
+	// Flag jenis draw, dikirim ke fragment shader (flat int flag):
+	//   0 = LAIN  (software transform / through: partikel, 2D, UI)
+	//   1 = MODEL (HW transform + ada normal: karakter 3D dll)
+	//   2 = DUNIA (HW transform tanpa normal: bangunan / tanah)
+	// Ditentukan otomatis dari ID shader, jadi tidak perlu edit manual di file glsl.
+	const bool vsHwNotThroughFlag = useHWTransform && !isModeThrough;
+	const int vsFlag = vsHwNotThroughFlag ? (hasNormal ? 1 : 2) : 0;
+	const bool useFlagVarying = ShaderLanguageIsOpenGL(compat.shaderLanguage) && compat.glslES30;
 	int matUpdate = id.Bits(VS_BIT_MATERIAL_UPDATE, 3);
 
 	bool lightUberShader = id.Bit(VS_BIT_LIGHT_UBERSHADER) && enableLighting;  // checking lighting here for the shader test's benefit, in reality if ubershader is set, lighting is set.
@@ -541,6 +550,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_vs);
 		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_vs);
 		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_vs);
+		if (useFlagVarying) {
+			// Urutan qualifier harus: flat out <precision> int. Precision sama dengan di FS.
+			WRITE(p, "flat %s mediump int flag;\n", compat.varying_vs);
+		}
 	}
 
 	if (useHWTransform) {
@@ -600,6 +613,9 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
+			if (useFlagVarying) {
+				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
+			}
 		}
 
 		// If non-through, the viewport has already been applied here.
@@ -625,6 +641,9 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
+			if (useFlagVarying) {
+				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
+			}
 		}
 		if (useSimpleStereo) {
 			float ipd = 0.065f;
