@@ -535,6 +535,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
 		WRITE(p, "uniform highp float u_time;\n");
+		// Batas jarak (view-space) untuk efek blur jauh, dari glsl/fx_params.txt (lihat ShaderManagerGLES).
+		WRITE(p, "uniform highp float u_near;\n");
+		WRITE(p, "uniform highp float u_far;\n");
 
 		if (compat.glslES30) {
 			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
@@ -552,6 +555,13 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
 			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
 			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
+			WRITE(p, "}\n");
+
+			// Kekuatan blur jarak jauh, 0..1. Hanya untuk dunia (flag 2); model, HUD, partikel = 0.
+			// 0 saat jarak <= u_near, 1 saat jarak >= u_far.
+			WRITE(p, "highp float getFarBlur() {\n");
+			WRITE(p, "  if (flag != 2) return 0.0;\n");
+			WRITE(p, "  return smoothstep(u_near, u_far, abs(v_3.z));\n");
 			WRITE(p, "}\n");
 		}
 
