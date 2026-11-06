@@ -76,6 +76,11 @@ public:
 	int u_time = -1;
 	float lastTime_ = -1000.0f;
 
+	// Parameter efek (jarak near/far untuk blur dunia), dibaca dari glsl/fx_params.txt.
+	int u_near = -1;
+	int u_far = -1;
+	int fxParamsVersion_ = -1;
+
 	int u_rasterOffset;
 	int u_minZmaxZ;
 
