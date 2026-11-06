@@ -72,6 +72,10 @@ public:
 	int u_scaleY;
 	int u_NaN;
 
+	// Waktu (detik) untuk efek animasi, diupdate otomatis (lihat UpdateUniforms).
+	int u_time = -1;
+	float lastTime_ = -1000.0f;
+
 	int u_rasterOffset;
 	int u_minZmaxZ;
 

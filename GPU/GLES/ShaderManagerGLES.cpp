@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <map>
 
 #include "Common/Data/Convert/SmallDataConvert.h"
@@ -121,6 +122,7 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_blendFixB, "u_blendFixB" });
 	queries.push_back({ &u_fbotexSize, "u_fbotexSize" });
 	queries.push_back({ &u_NaN, "u_NaN" });
+	queries.push_back({ &u_time, "u_time" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -363,6 +365,17 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 	if (useVR) {
 		is2D = Is2DVRObject(gstate.projMatrix, gstate.isModeThrough());
 		flatScreen = IsFlatVRScene();
+	}
+
+	// u_time: tidak lewat mekanisme dirty (nilainya berubah terus). Tiap program menyimpan
+	// nilai uniform-nya sendiri, jadi dicek per LinkedShader. Update dibatasi ~125x/detik.
+	if (u_time != -1) {
+		static const double timeStart = time_now_d();
+		const float t = (float)fmod(time_now_d() - timeStart, 4096.0);
+		if (t < lastTime_ || t - lastTime_ >= 0.008f) {
+			lastTime_ = t;
+			render_->SetUniformF(&u_time, 1, &t);
+		}
 	}
 
 	if (!dirty)
