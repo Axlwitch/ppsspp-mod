@@ -533,6 +533,28 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			WRITE(p, "flat %s mediump int flag;\n", compat.varying_fs);
 		}
 
+		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
+		WRITE(p, "uniform highp float u_time;\n");
+
+		if (compat.glslES30) {
+			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
+			//  - flag 1 (MODEL): pakai v_1.xyz dari VS, dinormalisasi ulang karena hasil interpolasi
+			//    tidak lagi panjang 1.
+			//  - flag 0/2 (DUNIA dll, tanpa normal vertex): normal permukaan dari turunan posisi
+			//    view-space (v_3). Arah dibalik kalau membelakangi kamera (kamera di titik asal).
+			// Turunan dihitung sebelum percabangan supaya valid (uniform control flow).
+			WRITE(p, "highp vec3 getFxNormal() {\n");
+			WRITE(p, "  highp vec3 nV = cross(dFdx(v_3.xyz), dFdy(v_3.xyz));\n");
+			WRITE(p, "  if (flag == 1) {\n");
+			WRITE(p, "    highp float l1 = dot(v_1.xyz, v_1.xyz);\n");
+			WRITE(p, "    return l1 > 0.0 ? v_1.xyz * inversesqrt(l1) : vec3(0.0, 0.0, 1.0);\n");
+			WRITE(p, "  }\n");
+			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
+			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
+			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
+			WRITE(p, "}\n");
+		}
+
 		if (!enableFragmentTestCache) {
 			if (enableAlphaTest && !alphaTestAgainstZero) {
 				if (compat.bitwiseOps) {

@@ -412,7 +412,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		*attrMask |= 1 << ATTR_POSITION;
 
 		if (useHWTransform && hasNormal) {
-			WRITE(p, "%s mediump vec3 normal;\n", compat.attribute);
+			WRITE(p, "%s highp vec3 normal;\n", compat.attribute);  // highp: normal presisi penuh untuk efek
 			*attrMask |= 1 << ATTR_NORMAL;
 		}
 		if (!useHWTransform) {
@@ -524,6 +524,8 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		WRITE(p, "uniform highp vec2 u_fogcoef;\n");
 		*uniformMask |= DIRTY_FOGCOEF;
+		// Waktu (detik) untuk efek animasi. Diupdate tiap frame dari ShaderManagerGLES (bukan lewat uniformMask).
+		WRITE(p, "uniform highp float u_time;\n");
 
 		WRITE(p, "%s%s lowp vec4 v_color0;\n", shading, compat.varying_vs);
 		if (lmode) {
@@ -635,11 +637,25 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
 		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			// v_1..v_4 bebas, default 0. Isi manual di dump vs_*.glsl. Di sini sudah tersedia
-			// worldpos, worldnormal, viewPos, position, u_world, u_view, u_proj.
-			WRITE(p, "  %sv_1 = vec4(0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
+			// Normal khusus efek (TERPISAH dari worldnormal yang dipakai lighting PSP, jadi emulasi
+			// lighting tidak berubah). Bedanya dengan worldnormal:
+			//  - presisi highp (worldnormal mediump -> di Mali/Adreno bisa dihitung fp16)
+			//  - pakai normal matrix yang benar (cofactor dari u_world), jadi tetap akurat
+			//    walau world matrix punya non-uniform scale / mirror
+			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (getFxNormal).
+			WRITE(p, "  highp vec3 fxRawN = %s;\n", hasNormal ? (flipNormal ? "-normal" : "normal") : (flipNormal ? "vec3(0.0, 0.0, -1.0)" : "vec3(0.0, 0.0, 1.0)"));
+			WRITE(p, "  highp mat3 fxW = mat3(u_world);\n");
+			WRITE(p, "  highp mat3 fxNM = mat3(cross(fxW[1], fxW[2]), cross(fxW[2], fxW[0]), cross(fxW[0], fxW[1]));\n");
+			WRITE(p, "  highp vec3 fxNormal = normalizeOr001(fxNM * fxRawN);\n");
+			WRITE(p, "  if (dot(fxW[0], fxNM[0]) < 0.0) fxNormal = -fxNormal;\n");  // koreksi tanda kalau matrix ter-mirror
+			// v_1 = normal VIEW-SPACE (xyz, w = 0): dunia -> view dengan u_view, jadi efek ikut kamera
+			//       (normal dunia tidak berubah saat kamera bergerak, normal view-space berubah).
+			// v_2 = posisi dunia
+			// v_3 = posisi view-space (untuk normal turunan di FS dan arah ke kamera)
+			// v_4 = bebas (0)
+			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_2 = vec4(worldpos, 1.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_3 = vec4(viewPos.xyz, 1.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
 			if (useFlagVarying) {
 				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
