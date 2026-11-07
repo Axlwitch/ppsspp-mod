@@ -44,98 +44,151 @@
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
 
-#ifdef __FRAGMENT_GLSL_FILE__
-// ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/fs001.glsl, fs002.glsl, dst (nomor urut).
-// Kalau file belum ada: hasil generator ditulis ke file (dump).
-// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
-#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
-// Folder dump & replace shader di Android.
-#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
-#endif
-#ifndef GLSL_REPLACE_BUFFER_SIZE
-// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
-#define GLSL_REPLACE_BUFFER_SIZE 16384
-#endif
-
-// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/fs_index.txt
-// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
-// Jangan hapus fs_index.txt tanpa menghapus semua fs*.glsl, karena nomornya akan berubah.
-static int FsGlslIndex(uint64_t hash, const Path &dir) {
-	static std::mutex mtx;
-	static bool loaded = false;
-	static std::map<uint64_t, int> indexOf;
-	static int nextIndex = 1;
-	std::lock_guard<std::mutex> lock(mtx);
-	const std::string mapFile = (dir / std::string("fs_index.txt")).ToString();
-	if (!loaded) {
-		loaded = true;
-		std::ifstream in(mapFile);
-		unsigned long long h = 0;
-		int idx = 0;
-		while (in >> std::hex >> h >> std::dec >> idx) {
-			indexOf[(uint64_t)h] = idx;
-			if (idx >= nextIndex) {
-				nextIndex = idx + 1;
-			}
-		}
-	}
-	auto it = indexOf.find(hash);
-	if (it != indexOf.end()) {
-		return it->second;
-	}
-	const int idx = nextIndex++;
-	indexOf[hash] = idx;
-	File::CreateDir(dir);
-	std::ofstream out(mapFile, std::ios::app);
-	if (out.is_open()) {
-		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
-	}
-	return idx;
+// ---- Efek model (flag 1) & dunia (flag 2), ditanam langsung di generator ----
+// Parameter tuning dikirim dari ShaderManagerGLES (g_fxTune) lewat uniform u_fx0..u_fx6,
+// diatur dari Settings > Graphics > FX Tune atau glsl/fx_tune.txt. Tidak perlu fs*.glsl replace.
+static const char *const kFxHelpers = R"FXGLSL(
+uniform highp vec4 u_fx0;
+uniform highp vec4 u_fx1;
+uniform highp vec4 u_fx2;
+uniform highp vec4 u_fx3;
+uniform highp vec4 u_fx4;
+uniform highp vec4 u_fx5;
+uniform highp vec4 u_fx6;
+#define FX_NORMAL_BLEND     u_fx0.x
+#define FX_NORMAL_Y_SIGN    u_fx0.y
+#define FX_SPHERE_FLIP_Y    u_fx0.z
+#define FX_SPHERE_ORIG      u_fx0.w
+#define FX_MATCAP_EXPOSURE  u_fx1.x
+#define FX_MATCAP_MIX       u_fx1.y
+#define FX_MATCAP_CONTRAST  u_fx1.z
+#define FX_SPEC_GAIN        u_fx1.w
+#define FX_BASE_GAIN        u_fx2.x
+#define FX_CAVITY_DARK      u_fx2.y
+#define FX_GOLD_GAIN        u_fx2.z
+#define FX_GOLD_BASE_DARK   u_fx2.w
+#define FX_FLOW_FREQ        u_fx3.x
+#define FX_FLOW_MIX         u_fx3.y
+#define FX_GREEN_LO         u_fx3.z
+#define FX_GREEN_HI         u_fx3.w
+#define FX_BLUR_START       u_fx4.z
+#define FX_BLUR_RADIUS      u_fx4.w
+#define FX_EMIS_COLOR1      u_fx5.xyz
+#define FX_EMIS_SPEED       u_fx5.w
+#define FX_EMIS_COLOR2      u_fx6.xyz
+#define FX_EMIS_SHIFT       u_fx6.w
+#define FX_MARK_SIZE_MIN    16
+bool fxIsBlue(mediump vec3 c) { return c.r < 0.1 && c.g < 0.1 && c.b > 0.8; }
+bool fxHasMarker() {
+  ivec2 sz = textureSize(tex, 0);
+  if (min(sz.x, sz.y) < FX_MARK_SIZE_MIN) return false;
+  ivec2 c = sz / 2;
+  return fxIsBlue(texelFetch(tex, c + ivec2(-3, -3), 0).rgb) &&
+         fxIsBlue(texelFetch(tex, c + ivec2( 3,  3), 0).rgb);
 }
-
-static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
-	// FNV-1a 64-bit atas seluruh byte ID shader.
-	uint64_t hash = 1469598103934665603ULL;
-	const uint8_t *bytes = (const uint8_t *)idData;
-	for (size_t i = 0; i < idSize; i++) {
-		hash ^= bytes[i];
-		hash *= 1099511628211ULL;
-	}
-	char name[64];
-
-#ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
-#else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
-#endif
-	// Nama: fs001.glsl, fs002.glsl, ... (nomor urut tetap dari fs_index.txt).
-	snprintf(name, sizeof(name), "fs%03d.glsl", FsGlslIndex(hash, dir));
-	std::string file = (dir / std::string(name)).ToString();
-
-	std::ifstream in(file, std::ios::binary);
-	if (in.is_open()) {
-		in.seekg(0, std::ios::end);
-		std::streamoff size = in.tellg();
-		in.seekg(0, std::ios::beg);
-		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
-			std::string code((size_t)size, '\0');
-			in.read(&code[0], size);
-			if (in.gcount() == size) {
-				memcpy(buffer, code.data(), (size_t)size);
-				buffer[size] = '\0';
-			}
-		}
-		return;
-	}
-
-	File::CreateDir(dir);
-	std::ofstream out(file, std::ios::binary);
-	if (out.is_open()) {
-		out.write(buffer, (std::streamsize)strlen(buffer));
-	}
+highp vec2 fxQuadUV(highp vec2 uv, highp vec2 origin) {
+  highp vec2 h = 0.5 / vec2(textureSize(tex, 0));
+  return clamp(fract(uv) * 0.5, h, 0.5 - h) + origin;
 }
-#endif
+mediump vec4 fxCommandTexel(highp vec2 uv) {
+  ivec2 sz = textureSize(tex, 0);
+  ivec2 hs = sz / 2;
+  ivec2 p = clamp(ivec2(fract(uv) * vec2(hs)), ivec2(0), hs - ivec2(1));
+  return texelFetch(tex, p + ivec2(0, hs.y), 0);
+}
+highp vec2 fxSphereUV(highp vec3 u, highp vec3 n) {
+  highp vec3 r = reflect(u, n);
+  highp float z1 = (FX_SPHERE_ORIG > 0.5) ? r.z : (r.z + 1.0);
+  highp float m = 2.0 * sqrt(max(r.x * r.x + r.y * r.y + (r.z + 1.0) * z1, 1e-8));
+  highp float y = r.y / m;
+  return vec2(r.x / m + 0.5, (FX_SPHERE_FLIP_Y > 0.5) ? 0.5 - y : y + 0.5);
+}
+highp vec3 fxApplyNormalMap(highp vec3 N, highp vec3 dp1, highp vec3 dp2, highp vec2 duv1, highp vec2 duv2, highp vec3 nm) {
+  highp vec3 dp2perp = cross(dp2, N);
+  highp vec3 dp1perp = cross(N, dp1);
+  highp vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+  highp vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+  highp float inv = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
+  highp vec3 Nm = normalize(T * (nm.x * inv) + B * (nm.y * inv * FX_NORMAL_Y_SIGN) + N * nm.z);
+  return normalize(mix(N, Nm, FX_NORMAL_BLEND));
+}
+mediump vec3 fxSoftClip(mediump vec3 c) {
+  mediump vec3 over = max(c - 0.8, 0.0);
+  return min(c, vec3(0.8)) + 0.2 * (1.0 - exp(-over * 5.0));
+}
+)FXGLSL";
+static const char *const kFxSample = R"FXGLSL(
+  highp vec2 fxDx = dFdx(fxUv);
+  highp vec2 fxDy = dFdy(fxUv);
+  highp vec3 fxDp1 = dFdx(v_3.xyz);
+  highp vec3 fxDp2 = dFdy(v_3.xyz);
+  bool fxAtlas = (flag == 1) && fxHasMarker();
+  highp float fxNl = dot(v_1.xyz, v_1.xyz);
+  highp vec3 fxN0 = fxNl > 0.0 ? v_1.xyz * inversesqrt(fxNl) : vec3(0.0, 0.0, 1.0);
+  mediump vec4 fxCmd = vec4(0.0);
+  mediump vec4 fxMask = vec4(0.0);
+  mediump vec3 fxNmv = vec3(0.0, 0.0, 1.0);
+  highp vec3 fxN = vec3(0.0, 0.0, 1.0);
+  vec4 t;
+  if (fxAtlas) {
+    t = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.0)), fxDx * 0.5, fxDy * 0.5);
+    fxNmv = textureGrad(tex, fxQuadUV(fxUv, vec2(0.5, 0.0)), fxDx * 0.5, fxDy * 0.5).rgb * 2.0 - 1.0;
+    fxCmd = fxCommandTexel(fxUv);
+    fxMask = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.5)), fxDx * 0.5, fxDy * 0.5);
+    fxN = fxApplyNormalMap(fxN0, fxDp1, fxDp2, fxDx, fxDy, fxNmv);
+  } else {
+    t = textureGrad(tex, fxUv, fxDx, fxDy);
+    highp float fxCoc = getFarBlur();
+    if (fxCoc > FX_BLUR_START) {
+      highp float fxR = fxCoc * FX_BLUR_RADIUS;
+      highp float fxNz = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+      highp float fxA = fxNz * 6.2831853;
+      highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * fxR;
+      highp vec2 fxS = vec2(-fxC.y, fxC.x);
+      highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
+      highp vec2 fxU2 = fxDx * fxS.x + fxDy * fxS.y;
+      highp vec2 fxGx = fxDx * (1.0 + fxR * 0.5);
+      highp vec2 fxGy = fxDy * (1.0 + fxR * 0.5);
+      t = 0.2 * t
+        + 0.2 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
+        + 0.2 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy)
+        + 0.2 * textureGrad(tex, fxUv + fxU2, fxGx, fxGy)
+        + 0.2 * textureGrad(tex, fxUv - fxU2, fxGx, fxGy);
+    }
+  }
+)FXGLSL";
+static const char *const kFxPost = R"FXGLSL(
+  if (fxAtlas) {
+    mediump vec3 fxCol = clamp(v.rgb, 0.0, 1.0) * FX_BASE_GAIN;
+    int fxIdx = int(floor(fxCmd.r * 10.0 + 0.02)) - 1;
+    if (fxIdx >= 0) {
+      fxIdx = min(fxIdx, 3);
+      highp vec2 fxOrigin = vec2(0.5 + 0.25 * float(fxIdx & 1), 0.5 + 0.25 * float(fxIdx >> 1));
+      highp vec2 fxSu = clamp(fxSphereUV(normalize(v_3.xyz), fxN), 0.02, 0.98);
+      mediump vec3 fxSm = textureLod(tex, fxOrigin + fxSu * 0.25, 0.0).rgb;
+      mediump float fxCav = mix(1.0, FX_CAVITY_DARK, smoothstep(0.15, 0.65, length(fxNmv.xy)));
+      mediump vec3 fxSc = clamp((fxSm - 0.5) * FX_MATCAP_CONTRAST + 0.5, 0.0, 1.5);
+      mediump vec3 fxShade = mix(vec3(1.0), fxSc * FX_MATCAP_EXPOSURE, FX_MATCAP_MIX);
+      fxCol = fxCol * fxShade * fxCav;
+      mediump float fxLum = dot(fxSm, vec3(0.299, 0.587, 0.114));
+      mediump float fxFres = pow(1.0 - clamp(dot(fxN, -normalize(v_3.xyz)), 0.0, 1.0), 3.0);
+      fxCol += FX_SPEC_GAIN * pow(fxLum, 2.5) + fxFres * 0.15 * fxSm;
+    }
+    mediump float fxGdom = fxMask.g - max(fxMask.r, fxMask.b);
+    mediump float fxGm = smoothstep(FX_GREEN_LO, FX_GREEN_HI, fxGdom);
+    highp float fxTime = u_time * FX_EMIS_SPEED;
+    mediump float fxPulse = 0.5 + 0.5 * sin(fxTime * 4.0);
+    mediump float fxFlow = 0.5 + 0.5 * sin(fxTime * 3.0 - (fxUv.x + fxUv.y) * FX_FLOW_FREQ);
+    mediump float fxEnergy = 0.35 + 0.65 * mix(fxPulse, fxFlow, FX_FLOW_MIX);
+    mediump float fxShift = smoothstep(0.7, 0.95, fxPulse) * FX_EMIS_SHIFT;
+    mediump vec3 fxGcol = mix(FX_EMIS_COLOR1, FX_EMIS_COLOR2, fxShift);
+    fxCol = mix(fxCol, fxCol * FX_GOLD_BASE_DARK, fxGm);
+    fxCol += fxGcol * fxEnergy * fxGm * FX_GOLD_GAIN * (0.5 + 0.5 * fxMask.g);
+    v.rgb = fxSoftClip(fxCol);
+  }
+)FXGLSL";
+
+
 
 static const SamplerDef samplersMono[3] = {
 	{ 0, "tex" },
@@ -262,6 +315,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	const bool blueToAlpha = replaceBlend == ReplaceBlendType::REPLACE_BLEND_BLUE_TO_ALPHA;
 
 	bool isModeClear = id.Bit(FS_BIT_CLEARMODE);
+	// Efek model/dunia hanya untuk OpenGL ES 3.x, tekstur 2D biasa, texfunc modulate, tanpa depal.
+	const bool fxEnableHelpers = ShaderLanguageIsOpenGL(compat.shaderLanguage) && compat.glslES30 && doTexture && !isModeClear &&
+		!texture3D && !arrayTexture && texFunc == GE_TEXFUNC_MODULATE && shaderDepalMode == ShaderDepalMode::OFF;
 
 	const char *shading = "";
 	if (compat.glslES30 || compat.shaderLanguage == ShaderLanguage::GLSL_VULKAN) {
@@ -564,6 +620,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			WRITE(p, "  return smoothstep(u_near, u_far, abs(v_3.z));\n");
 			WRITE(p, "}\n");
 		}
+		if (fxEnableHelpers) {
+			p.C(kFxHelpers);
+		}
 
 		if (!enableFragmentTestCache) {
 			if (enableAlphaTest && !alphaTestAgainstZero) {
@@ -743,7 +802,12 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				doTextureProjection = false;
 			}
 
-			switch (shaderDepalMode) {
+			// Jalur efek: menggantikan pembacaan tekstur biasa (aslinya dipakai untuk draw selain flag 1/2).
+			const bool fxUse = fxEnableHelpers && !doTextureProjection;
+			if (fxUse) {
+				WRITE(p, "  highp vec2 fxUv = %s.xy;\n", texcoord);
+				p.C(kFxSample);
+			} else switch (shaderDepalMode) {
 			case ShaderDepalMode::OFF:
 				if (compat.shaderLanguage == HLSL_D3D11) {
 					if (texture3D) {
@@ -1004,6 +1068,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				WRITE(p, "  v.rgb = clamp(v.rgb * u_texNoAlphaMul.y, 0.0, 1.0);\n");
 			} else {
 				WRITE(p, "  v.rgb *= u_texNoAlphaMul.y;\n");
+			}
+			if (fxUse) {
+				p.C(kFxPost);
 			}
 		} else {
 			// No texture mapping
@@ -1374,11 +1441,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 	WRITE(p, "}\n");
 
-#ifdef __FRAGMENT_GLSL_FILE__
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-		FsGlslReplace(&id, sizeof(id), buffer);
-	}
-#endif
 
 	return true;
 }
