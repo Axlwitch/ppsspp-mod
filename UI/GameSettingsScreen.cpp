@@ -386,6 +386,28 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 			graphicsSettings->Add(new ItemHeader("FX Tune: dunia / blur jauh (flag 2)"));
 		else if (i == 20)
 			graphicsSettings->Add(new ItemHeader("FX Tune: emisif model (warna & kecepatan)"));
+		else if (i == 28)
+			graphicsSettings->Add(new ItemHeader("FX Tune: saklar efek (mati = shader default)"));
+		else if (i == 32)
+			graphicsSettings->Add(new ItemHeader("FX Tune: emisif area gelap (flag 1 tanpa atlas)"));
+		else if (i == 44)
+			graphicsSettings->Add(new ItemHeader("FX Tune: rim + matcap (flag 1 tanpa atlas)"));
+		if ((i >= 28 && i < 32) || i == 44) {
+			static const char *const kToggleLabels[5] = {
+				"Efek atlas (flag 1)",
+				"Efek emisif area gelap (flag 1)",
+				"Blur jarak jauh (flag 2)",
+				"Blur kualitas tinggi 5 tap (flag 2, lebih berat)",
+				"Efek rim + matcap (flag 1)" };
+			const int k = (i == 44) ? 4 : i - 28;
+			CheckBox *fxToggle = graphicsSettings->Add(new CheckBox(&g_fxTune.on[k], kToggleLabels[k]));
+			fxToggle->OnClick.Add([k](UI::EventParams &e) {
+				g_fxTune.v[FxToggleIndex(k)] = g_fxTune.on[k] ? 1.0f : 0.0f;
+				g_fxTune.version++;
+				FxTuneSave();
+			});
+			continue;
+		}
 		PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[i], kFxMin[i], kFxMax[i], kFxDef[i], kFxNames[i], (kFxMax[i] - kFxMin[i]) / 100.0f, screenManager(), ""));
 		fx->OnChange.Add([](UI::EventParams &e) {
 			g_fxTune.version++;
