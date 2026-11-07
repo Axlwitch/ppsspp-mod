@@ -55,6 +55,12 @@ uniform highp vec4 u_fx3;
 uniform highp vec4 u_fx4;
 uniform highp vec4 u_fx5;
 uniform highp vec4 u_fx6;
+uniform highp vec4 u_fx7;
+uniform highp vec4 u_fx8;
+uniform highp vec4 u_fx9;
+uniform highp vec4 u_fx10;
+uniform highp vec4 u_fx11;
+uniform highp vec4 u_fx12;
 #define FX_NORMAL_BLEND     u_fx0.x
 #define FX_NORMAL_Y_SIGN    u_fx0.y
 #define FX_SPHERE_FLIP_Y    u_fx0.z
@@ -77,6 +83,26 @@ uniform highp vec4 u_fx6;
 #define FX_EMIS_SPEED       u_fx5.w
 #define FX_EMIS_COLOR2      u_fx6.xyz
 #define FX_EMIS_SHIFT       u_fx6.w
+#define FX_ON_ATLAS         u_fx7.x
+#define FX_ON_EMIS          u_fx7.y
+#define FX_ON_BLUR          u_fx7.z
+#define FX_BLUR_HQ          u_fx7.w
+#define FX_DK_COLOR1        u_fx8.xyz
+#define FX_DK_SPEED         u_fx8.w
+#define FX_DK_COLOR2        u_fx9.xyz
+#define FX_DK_SHIFT         u_fx9.w
+#define FX_DK_LO            u_fx10.x
+#define FX_DK_HI            u_fx10.y
+#define FX_DK_GAIN          u_fx10.z
+#define FX_DK_CONTRAST      u_fx10.w
+#define FX_ON_RIM           u_fx11.x
+#define FX_RM_CONTRAST      u_fx11.y
+#define FX_RM_R             u_fx11.z
+#define FX_RM_G             u_fx11.w
+#define FX_RM_MATCAP        u_fx12.x
+#define FX_RM_POWER         u_fx12.y
+#define FX_RM_GAIN          u_fx12.z
+#define FX_RM_SCREEN        u_fx12.w
 #define FX_MARK_SIZE_MIN    16
 bool fxIsBlue(mediump vec3 c) { return c.r < 0.1 && c.g < 0.1 && c.b > 0.8; }
 bool fxHasMarker() {
@@ -122,7 +148,9 @@ static const char kFxSample[] = R"FXGLSL(
   highp vec2 fxDy = dFdy(fxUv);
   highp vec3 fxDp1 = dFdx(v_3.xyz);
   highp vec3 fxDp2 = dFdy(v_3.xyz);
-  bool fxAtlas = (flag == 1) && fxHasMarker();
+  bool fxAtlas = (flag == 1) && (FX_ON_ATLAS > 0.5) && fxHasMarker();
+  bool fxRim = (flag == 1) && !fxAtlas && (FX_ON_RIM > 0.5);
+  bool fxDark = (flag == 1) && !fxAtlas && !fxRim && (FX_ON_EMIS > 0.5);
   highp float fxNl = dot(v_1.xyz, v_1.xyz);
   highp vec3 fxN0 = fxNl > 0.0 ? v_1.xyz * inversesqrt(fxNl) : vec3(0.0, 0.0, 1.0);
   mediump vec4 fxCmd = vec4(0.0);
@@ -138,22 +166,31 @@ static const char kFxSample[] = R"FXGLSL(
     fxN = fxApplyNormalMap(fxN0, fxDp1, fxDp2, fxDx, fxDy, fxNmv);
   } else {
     t = textureGrad(tex, fxUv, fxDx, fxDy);
-    highp float fxCoc = getFarBlur();
+    highp float fxCoc = (FX_ON_BLUR > 0.5) ? getFarBlur() : 0.0;
     if (fxCoc > FX_BLUR_START) {
       highp float fxR = fxCoc * FX_BLUR_RADIUS;
       highp float fxNz = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
       highp float fxA = fxNz * 6.2831853;
-      highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * fxR;
-      highp vec2 fxS = vec2(-fxC.y, fxC.x);
-      highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
-      highp vec2 fxU2 = fxDx * fxS.x + fxDy * fxS.y;
       highp vec2 fxGx = fxDx * (1.0 + fxR * 0.5);
       highp vec2 fxGy = fxDy * (1.0 + fxR * 0.5);
-      t = 0.2 * t
-        + 0.2 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
-        + 0.2 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy)
-        + 0.2 * textureGrad(tex, fxUv + fxU2, fxGx, fxGy)
-        + 0.2 * textureGrad(tex, fxUv - fxU2, fxGx, fxGy);
+      if (FX_BLUR_HQ > 0.5) {
+        highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * fxR;
+        highp vec2 fxS = vec2(-fxC.y, fxC.x);
+        highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
+        highp vec2 fxU2 = fxDx * fxS.x + fxDy * fxS.y;
+        t = 0.2 * t
+          + 0.2 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
+          + 0.2 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy)
+          + 0.2 * textureGrad(tex, fxUv + fxU2, fxGx, fxGy)
+          + 0.2 * textureGrad(tex, fxUv - fxU2, fxGx, fxGy);
+      } else {
+        // Mode ringan: 3 tap (tengah + sepasang tap berlawanan arah, arah diputar per piksel oleh noise).
+        highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * (fxR * 1.3);
+        highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
+        t = 0.4 * t
+          + 0.3 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
+          + 0.3 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy);
+      }
     }
   }
 )FXGLSL";
@@ -185,6 +222,32 @@ static const char kFxPost[] = R"FXGLSL(
     fxCol = mix(fxCol, fxCol * FX_GOLD_BASE_DARK, fxGm);
     fxCol += fxGcol * fxEnergy * fxGm * FX_GOLD_GAIN * (0.5 + 0.5 * fxMask.g);
     v.rgb = fxSoftClip(fxCol);
+  } else if (fxRim) {
+    // Rim + matcap prosedural. Terpisah dari atlas dan emisif gelap (prioritas: atlas > rim > emisif gelap).
+    highp vec3 fxSn = cross(fxDp1, fxDp2);
+    highp float fxSl = dot(fxSn, fxSn);
+    highp vec3 fxRn = fxN0;
+    if (fxSl > 0.0) fxRn = normalize(mix(fxN0, fxSn * inversesqrt(fxSl), FX_RM_SCREEN));
+    highp vec2 fxMu = fxRn.xy * 0.45 + 0.5;
+    mediump float fxMp = pow(max(fxMu.y, 0.0), 1.5) * 0.4 + 0.5 * sin(fxMu.x * 6.28) * 0.08;
+    mediump vec3 fxMc = vec3(fxMp * 0.85, fxMp * 0.95, fxMp * 1.15);
+    mediump vec3 fxRc = (clamp(v.rgb, 0.0, 1.0) - 0.5) * FX_RM_CONTRAST + 0.5;
+    fxRc.r *= FX_RM_R;
+    fxRc.g *= FX_RM_G;
+    mediump float fxRf = pow(1.0 - abs(dot(normalize(-v_3.xyz), fxN0)), FX_RM_POWER) * FX_RM_GAIN;
+    v.rgb = clamp(fxRc + fxMc * FX_RM_MATCAP + vec3(fxRf), 0.0, 1.0);
+  } else if (fxDark) {
+    // Emisif area gelap: kontras dasar + denyut Cyan -> kilat merah, hanya di bagian tekstur paling gelap.
+    mediump vec3 fxB = clamp(v.rgb, 0.0, 1.0);
+    fxB = clamp((fxB - 0.5) * FX_DK_CONTRAST + 0.5, 0.0, 1.0) * vec3(1.04, 1.03, 1.0);
+    mediump float fxLm = dot(t.rgb, vec3(0.2126, 0.7152, 0.0722));
+    mediump float fxDm = 1.0 - smoothstep(FX_DK_LO, FX_DK_HI, fxLm);
+    highp float fxTa = u_time * FX_DK_SPEED * 0.6;
+    mediump float fxPl = pow(abs(sin(fxTa)), 1.5);
+    mediump float fxSh = smoothstep(0.7, 0.95, fxPl);
+    mediump vec3 fxEc = mix(FX_DK_COLOR1, FX_DK_COLOR2, fxSh * FX_DK_SHIFT);
+    fxB += fxEc * (0.05 + 0.95 * fxPl) * fxDm * FX_DK_GAIN;
+    v.rgb = pow(clamp(fxB, 0.0, 1.0), vec3(1.0 / 0.9));
   }
 )FXGLSL";
 
