@@ -47,7 +47,7 @@
 // ---- Efek model (flag 1) & dunia (flag 2), ditanam langsung di generator ----
 // Parameter tuning dikirim dari ShaderManagerGLES (g_fxTune) lewat uniform u_fx0..u_fx6,
 // diatur dari Settings > Graphics > FX Tune atau glsl/fx_tune.txt. Tidak perlu fs*.glsl replace.
-static const char *const kFxHelpers = R"FXGLSL(
+static const char kFxHelpers[] = R"FXGLSL(
 uniform highp vec4 u_fx0;
 uniform highp vec4 u_fx1;
 uniform highp vec4 u_fx2;
@@ -117,7 +117,7 @@ mediump vec3 fxSoftClip(mediump vec3 c) {
   return min(c, vec3(0.8)) + 0.2 * (1.0 - exp(-over * 5.0));
 }
 )FXGLSL";
-static const char *const kFxSample = R"FXGLSL(
+static const char kFxSample[] = R"FXGLSL(
   highp vec2 fxDx = dFdx(fxUv);
   highp vec2 fxDy = dFdy(fxUv);
   highp vec3 fxDp1 = dFdx(v_3.xyz);
@@ -157,7 +157,7 @@ static const char *const kFxSample = R"FXGLSL(
     }
   }
 )FXGLSL";
-static const char *const kFxPost = R"FXGLSL(
+static const char kFxPost[] = R"FXGLSL(
   if (fxAtlas) {
     mediump vec3 fxCol = clamp(v.rgb, 0.0, 1.0) * FX_BASE_GAIN;
     int fxIdx = int(floor(fxCmd.r * 10.0 + 0.02)) - 1;
