@@ -82,6 +82,7 @@
 #include "Core/Util/PortManager.h"
 #include "GPU/Common/PostShader.h"
 #include "GPU/GPU.h"
+#include "GPU/GLES/ShaderManagerGLES.h"
 
 #if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
 #include "Core/Util/DarwinFileSystemServices.h"
@@ -376,6 +377,26 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
 
 	graphicsSettings->Add(new CheckBox(&g_Config.bReplaceTextures, dev->T("Replace textures")));
+
+	// Tuning efek shader (flag 1 = model, flag 2 = dunia). Disimpan ke glsl/fx_tune.txt.
+	for (int i = 0; i < FX_TUNE_COUNT; i++) {
+		if (i == 0)
+			graphicsSettings->Add(new ItemHeader("FX Tune: model (flag 1)"));
+		else if (i == 16)
+			graphicsSettings->Add(new ItemHeader("FX Tune: dunia / blur jauh (flag 2)"));
+		else if (i == 20)
+			graphicsSettings->Add(new ItemHeader("FX Tune: emisif model (warna & kecepatan)"));
+		PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[i], kFxMin[i], kFxMax[i], kFxDef[i], kFxNames[i], (kFxMax[i] - kFxMin[i]) / 100.0f, screenManager(), ""));
+		fx->OnChange.Add([](UI::EventParams &e) {
+			g_fxTune.version++;
+			FxTuneSave();
+		});
+	}
+	Choice *fxReset = graphicsSettings->Add(new Choice("FX Tune: reset default"));
+	fxReset->OnClick.Add([this](UI::EventParams &e) {
+		FxTuneReset();
+		RecreateViews();
+	});
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Display")));
 
