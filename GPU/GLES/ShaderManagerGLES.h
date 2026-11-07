@@ -41,9 +41,19 @@ class IOFile;
 //  16..19 = near, far, blur start, radius (flag 2) -> u_fx4
 //  20..23 = warna emisif 1 (RGB) + kecepatan  -> u_fx5
 //  24..27 = warna emisif 2 (RGB) + jumlah pergeseran warna -> u_fx6
-constexpr int FX_TUNE_COUNT = 28;
+//  28..31 = saklar: atlas, emisif area gelap, blur jauh (flag 2), blur kualitas tinggi -> u_fx7
+//  32..35 = emisif gelap: warna 1 (RGB) + kecepatan -> u_fx8
+//  36..39 = emisif gelap: warna 2 (RGB) + jumlah pergeseran -> u_fx9
+//  40..43 = emisif gelap: batas gelap lo, hi, gain, kontras dasar -> u_fx10
+//  44..47 = rim: saklar, kontras, gain R, gain G -> u_fx11
+//  48..51 = rim: matcap, pangkat fresnel, gain fresnel, campur normal layar -> u_fx12
+constexpr int FX_TUNE_COUNT = 52;
+constexpr int FX_VEC_COUNT = FX_TUNE_COUNT / 4;
+// Indeks di v[] untuk saklar ke-k: 28..31 lalu 44 (rim).
+inline int FxToggleIndex(int k) { return k < 4 ? 28 + k : 44; }
 struct FxTune {
 	float v[FX_TUNE_COUNT];
+	bool on[5] = { true, true, true, false, false };  // salinan bool saklar (lihat FxToggleIndex) untuk UI
 	int version = 0;
 	double lastCheck = -1000.0;
 };
@@ -54,6 +64,7 @@ extern const float kFxMax[FX_TUNE_COUNT];
 extern const float kFxDef[FX_TUNE_COUNT];
 void FxTuneSave();
 void FxTuneReset();
+void FxTuneSyncToggles();
 
 class LinkedShader {
 public:
@@ -100,7 +111,7 @@ public:
 	int u_near = -1;
 	int u_far = -1;
 	// Parameter tuning efek (u_fx0..u_fx6), diatur dari UI / glsl/fx_tune.txt.
-	int u_fx[7] = { -1, -1, -1, -1, -1, -1, -1 };
+	int u_fx[FX_VEC_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 	int fxParamsVersion_ = -1;
 
 	int u_rasterOffset;

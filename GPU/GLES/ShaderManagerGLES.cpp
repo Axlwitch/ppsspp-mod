@@ -89,14 +89,22 @@ const char *const kFxNames[FX_TUNE_COUNT] = {
 	"FLOW_FREQ", "FLOW_MIX", "GREEN_LO", "GREEN_HI",
 	"FAR_NEAR", "FAR_FAR", "BLUR_START", "BLUR_RADIUS",
 	"EMIS_R", "EMIS_G", "EMIS_B", "EMIS_SPEED",
-	"EMIS2_R", "EMIS2_G", "EMIS2_B", "EMIS_SHIFT" };
-const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0 };
-const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1,  6, 1, 2, 1,  3, 1, 4, 1,  60, 1, 1, 1,  2000, 4000, 1, 16,  3, 3, 3, 5,  3, 3, 3, 1 };
-const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0,  2.4f, 1, 0.8f, 0.30f,  1.25f, 0.9f, 1.6f, 0.6f,  18, 0.45f, 0.06f, 0.28f,  400, 900, 0.30f, 8,  1.2f, 0.95f, 0.2f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f };
+	"EMIS2_R", "EMIS2_G", "EMIS2_B", "EMIS_SHIFT",
+	"ON_ATLAS", "ON_EMISSIVE", "ON_BLUR", "BLUR_HQ",
+	"DK_R1", "DK_G1", "DK_B1", "DK_SPEED",
+	"DK_R2", "DK_G2", "DK_B2", "DK_SHIFT",
+	"DK_LO", "DK_HI", "DK_GAIN", "DK_CONTRAST",
+	"ON_RIM", "RM_CONTRAST", "RM_R", "RM_G",
+	"RM_MATCAP", "RM_POWER", "RM_GAIN", "RM_SCREEN" };
+const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0.5,  0, 0.5f, 0, 0,  0, 0.5f, 0, 0 };
+const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1,  6, 1, 2, 1,  3, 1, 4, 1,  60, 1, 1, 1,  2000, 4000, 1, 16,  3, 3, 3, 5,  3, 3, 3, 1,  1, 1, 1, 1,  3, 3, 3, 5,  3, 3, 3, 1,  1, 1, 6, 2,  1, 2, 2, 2,  2, 8, 3, 1 };
+const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0,  2.4f, 1, 0.8f, 0.30f,  1.25f, 0.9f, 1.6f, 0.6f,  18, 0.45f, 0.06f, 0.28f,  400, 900, 0.30f, 8,  1.2f, 0.95f, 0.2f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f,  1, 1, 1, 0,  0.1f, 0.8f, 0.9f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f,  0.02f, 0.25f, 2.2f, 1.08f,  0, 1.08f, 1.09f, 1.08f,  0.2f, 3.5f, 0.8f, 0.25f };
 
 static FxTune MakeFxTune() {
 	FxTune t;
 	memcpy(t.v, kFxDef, sizeof(t.v));
+	for (int k = 0; k < 5; k++)
+		t.on[k] = t.v[FxToggleIndex(k)] > 0.5f;
 	return t;
 }
 FxTune g_fxTune = MakeFxTune();
@@ -118,8 +126,14 @@ void FxTuneSave() {
 	g_fxTune.lastCheck = time_now_d();  // jangan langsung dibaca ulang
 }
 
+void FxTuneSyncToggles() {
+	for (int k = 0; k < 5; k++)
+		g_fxTune.on[k] = g_fxTune.v[FxToggleIndex(k)] > 0.5f;
+}
+
 void FxTuneReset() {
 	memcpy(g_fxTune.v, kFxDef, sizeof(kFxDef));
+	FxTuneSyncToggles();
 	g_fxTune.version++;
 	FxTuneSave();
 }
@@ -162,6 +176,7 @@ static void RefreshFxTune() {
 	}
 	if (memcmp(nv, g_fxTune.v, sizeof(nv)) != 0) {
 		memcpy(g_fxTune.v, nv, sizeof(nv));
+		FxTuneSyncToggles();
 		g_fxTune.version++;
 	}
 }
@@ -227,6 +242,12 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_fx[4], "u_fx4" });
 	queries.push_back({ &u_fx[5], "u_fx5" });
 	queries.push_back({ &u_fx[6], "u_fx6" });
+	queries.push_back({ &u_fx[7], "u_fx7" });
+	queries.push_back({ &u_fx[8], "u_fx8" });
+	queries.push_back({ &u_fx[9], "u_fx9" });
+	queries.push_back({ &u_fx[10], "u_fx10" });
+	queries.push_back({ &u_fx[11], "u_fx11" });
+	queries.push_back({ &u_fx[12], "u_fx12" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -474,7 +495,7 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 	// u_near / u_far / u_fx0..6: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya
 	// berubah (version naik) atau program ini baru dipakai pertama kali.
 	bool fxAny = (u_near != -1 || u_far != -1);
-	for (int i = 0; i < 7; i++)
+	for (int i = 0; i < FX_VEC_COUNT; i++)
 		fxAny = fxAny || (u_fx[i] != -1);
 	if (fxAny) {
 		RefreshFxTune();
@@ -486,7 +507,7 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 				render_->SetUniformF(&u_near, 1, &nearV);
 			if (u_far != -1)
 				render_->SetUniformF(&u_far, 1, &farV);
-			for (int i = 0; i < 7; i++)
+			for (int i = 0; i < FX_VEC_COUNT; i++)
 				if (u_fx[i] != -1)
 					render_->SetUniformF(&u_fx[i], 4, &g_fxTune.v[i * 4]);
 		}
