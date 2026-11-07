@@ -21,8 +21,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <map>
+#include <sstream>
 
 #include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Data/Text/I18n.h"
@@ -71,41 +74,95 @@ Shader::~Shader() {
 	render_->DeleteShader(shader);
 }
 
-// ---- Parameter efek (u_near / u_far) ----
-// Dibaca dari <glsl>/fx_params.txt, isinya dua angka: "near far" (contoh: 60 300).
-// File dicek ulang tiap ~1 detik, jadi bisa diubah saat game jalan tanpa build ulang.
-// Kalau file tidak ada / tidak valid, dipakai nilai default di bawah.
+// ---- Tuning efek shader ----
+// Nilai diatur dari UI (Settings > Graphics > FX Tune) dan disimpan ke <glsl>/fx_tune.txt
+// (format KEY=VALUE, '#' = komentar). File dicek ulang tiap ~1 detik, jadi bisa juga diedit
+// manual saat game jalan. Kalau fx_tune.txt belum ada, near/far dibaca dari fx_params.txt lama.
 #if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
 #define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
 #endif
 
-struct FxParams {
-	float nearV = 60.0f;
-	float farV = 300.0f;
-	int version = 0;
-	double lastCheck = -1000.0;
-};
-static FxParams g_fxParams;
+const char *const kFxNames[FX_TUNE_COUNT] = {
+	"NORMAL_BLEND", "NORMAL_Y_SIGN", "SPHERE_FLIP_Y", "SPHERE_ORIG",
+	"MATCAP_EXPOSURE", "MATCAP_MIX", "MATCAP_CONTRAST", "SPEC_GAIN",
+	"BASE_GAIN", "CAVITY_DARK", "GOLD_GAIN", "GOLD_BASE_DARK",
+	"FLOW_FREQ", "FLOW_MIX", "GREEN_LO", "GREEN_HI",
+	"FAR_NEAR", "FAR_FAR", "BLUR_START", "BLUR_RADIUS",
+	"EMIS_R", "EMIS_G", "EMIS_B", "EMIS_SPEED",
+	"EMIS2_R", "EMIS2_G", "EMIS2_B", "EMIS_SHIFT" };
+const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0 };
+const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1,  6, 1, 2, 1,  3, 1, 4, 1,  60, 1, 1, 1,  2000, 4000, 1, 16,  3, 3, 3, 5,  3, 3, 3, 1 };
+const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0,  2.4f, 1, 0.8f, 0.30f,  1.25f, 0.9f, 1.6f, 0.6f,  18, 0.45f, 0.06f, 0.28f,  400, 900, 0.30f, 8,  1.2f, 0.95f, 0.2f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f };
 
-static void RefreshFxParams() {
-	const double now = time_now_d();
-	if (now - g_fxParams.lastCheck < 1.0)
-		return;
-	g_fxParams.lastCheck = now;
+static FxTune MakeFxTune() {
+	FxTune t;
+	memcpy(t.v, kFxDef, sizeof(t.v));
+	return t;
+}
+FxTune g_fxTune = MakeFxTune();
 
+static Path FxDir() {
 #ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+	return Path(std::string(GLSL_REPLACE_DIR));
 #else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
+	return g_Config.memStickDirectory / std::string("glsl");
 #endif
-	std::ifstream in((dir / std::string("fx_params.txt")).ToString());
-	float n = 0.0f, f = 0.0f;
-	if (in.is_open() && (in >> n >> f) && f > n && n >= 0.0f) {
-		if (n != g_fxParams.nearV || f != g_fxParams.farV) {
-			g_fxParams.nearV = n;
-			g_fxParams.farV = f;
-			g_fxParams.version++;
+}
+
+void FxTuneSave() {
+	std::ofstream out((FxDir() / std::string("fx_tune.txt")).ToString());
+	if (!out.is_open())
+		return;
+	for (int i = 0; i < FX_TUNE_COUNT; i++)
+		out << kFxNames[i] << "=" << g_fxTune.v[i] << "\n";
+	g_fxTune.lastCheck = time_now_d();  // jangan langsung dibaca ulang
+}
+
+void FxTuneReset() {
+	memcpy(g_fxTune.v, kFxDef, sizeof(kFxDef));
+	g_fxTune.version++;
+	FxTuneSave();
+}
+
+static void RefreshFxTune() {
+	const double now = time_now_d();
+	if (now - g_fxTune.lastCheck < 1.0)
+		return;
+	g_fxTune.lastCheck = now;
+
+	float nv[FX_TUNE_COUNT];
+	memcpy(nv, g_fxTune.v, sizeof(nv));
+	std::ifstream in((FxDir() / std::string("fx_tune.txt")).ToString());
+	if (in.is_open()) {
+		std::string line;
+		while (std::getline(in, line)) {
+			size_t c = line.find('#');
+			if (c != std::string::npos)
+				line.resize(c);
+			for (char &ch : line)
+				if (ch == '=')
+					ch = ' ';
+			std::istringstream ss(line);
+			std::string key;
+			float val;
+			if (!(ss >> key >> val))
+				continue;
+			for (int i = 0; i < FX_TUNE_COUNT; i++)
+				if (key == kFxNames[i])
+					nv[i] = val;
 		}
+	} else {
+		// Kompatibilitas: fx_params.txt lama berisi "near far".
+		std::ifstream old((FxDir() / std::string("fx_params.txt")).ToString());
+		float n = 0.0f, f = 0.0f;
+		if (old.is_open() && (old >> n >> f) && f > n && n >= 0.0f) {
+			nv[16] = n;
+			nv[17] = f;
+		}
+	}
+	if (memcmp(nv, g_fxTune.v, sizeof(nv)) != 0) {
+		memcpy(g_fxTune.v, nv, sizeof(nv));
+		g_fxTune.version++;
 	}
 }
 
@@ -163,6 +220,13 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_time, "u_time" });
 	queries.push_back({ &u_near, "u_near" });
 	queries.push_back({ &u_far, "u_far" });
+	queries.push_back({ &u_fx[0], "u_fx0" });
+	queries.push_back({ &u_fx[1], "u_fx1" });
+	queries.push_back({ &u_fx[2], "u_fx2" });
+	queries.push_back({ &u_fx[3], "u_fx3" });
+	queries.push_back({ &u_fx[4], "u_fx4" });
+	queries.push_back({ &u_fx[5], "u_fx5" });
+	queries.push_back({ &u_fx[6], "u_fx6" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -407,16 +471,24 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		flatScreen = IsFlatVRScene();
 	}
 
-	// u_near / u_far: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya berubah
-	// (version naik) atau program ini baru dipakai pertama kali.
-	if (u_near != -1 || u_far != -1) {
-		RefreshFxParams();
-		if (fxParamsVersion_ != g_fxParams.version) {
-			fxParamsVersion_ = g_fxParams.version;
+	// u_near / u_far / u_fx0..6: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya
+	// berubah (version naik) atau program ini baru dipakai pertama kali.
+	bool fxAny = (u_near != -1 || u_far != -1);
+	for (int i = 0; i < 7; i++)
+		fxAny = fxAny || (u_fx[i] != -1);
+	if (fxAny) {
+		RefreshFxTune();
+		if (fxParamsVersion_ != g_fxTune.version) {
+			fxParamsVersion_ = g_fxTune.version;
+			float nearV = g_fxTune.v[16];
+			float farV = std::max(g_fxTune.v[17], nearV + 1.0f);  // smoothstep butuh far > near
 			if (u_near != -1)
-				render_->SetUniformF(&u_near, 1, &g_fxParams.nearV);
+				render_->SetUniformF(&u_near, 1, &nearV);
 			if (u_far != -1)
-				render_->SetUniformF(&u_far, 1, &g_fxParams.farV);
+				render_->SetUniformF(&u_far, 1, &farV);
+			for (int i = 0; i < 7; i++)
+				if (u_fx[i] != -1)
+					render_->SetUniformF(&u_fx[i], 4, &g_fxTune.v[i * 4]);
 		}
 	}
 

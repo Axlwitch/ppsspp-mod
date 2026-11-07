@@ -35,6 +35,26 @@ namespace File {
 class IOFile;
 }
 
+// ---- Tuning efek shader (UI + glsl/fx_tune.txt) ----
+// Nilai i dikirim sebagai u_fx[i/4][i%4]:
+//  0..15  = parameter model (flag 1)      -> u_fx0..u_fx3
+//  16..19 = near, far, blur start, radius (flag 2) -> u_fx4
+//  20..23 = warna emisif 1 (RGB) + kecepatan  -> u_fx5
+//  24..27 = warna emisif 2 (RGB) + jumlah pergeseran warna -> u_fx6
+constexpr int FX_TUNE_COUNT = 28;
+struct FxTune {
+	float v[FX_TUNE_COUNT];
+	int version = 0;
+	double lastCheck = -1000.0;
+};
+extern FxTune g_fxTune;
+extern const char *const kFxNames[FX_TUNE_COUNT];
+extern const float kFxMin[FX_TUNE_COUNT];
+extern const float kFxMax[FX_TUNE_COUNT];
+extern const float kFxDef[FX_TUNE_COUNT];
+void FxTuneSave();
+void FxTuneReset();
+
 class LinkedShader {
 public:
 	LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, FShaderID FSID, Shader *fs, bool useHWTransform, bool preloading = false);
@@ -79,6 +99,8 @@ public:
 	// Parameter efek (jarak near/far untuk blur dunia), dibaca dari glsl/fx_params.txt.
 	int u_near = -1;
 	int u_far = -1;
+	// Parameter tuning efek (u_fx0..u_fx6), diatur dari UI / glsl/fx_tune.txt.
+	int u_fx[7] = { -1, -1, -1, -1, -1, -1, -1 };
 	int fxParamsVersion_ = -1;
 
 	int u_rasterOffset;
