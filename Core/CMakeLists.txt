@@ -342,6 +342,8 @@ add_library(Core STATIC
 	CoreTiming.h
 	CwCheat.cpp
 	CwCheat.h
+	MemScan.cpp
+    MemScan.h
 	FrameTiming.cpp
 	FrameTiming.h
 	HDRemaster.cpp
