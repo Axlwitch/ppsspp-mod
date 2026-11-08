@@ -50,6 +50,7 @@
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
+#include "Core/System.h"
 #include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
