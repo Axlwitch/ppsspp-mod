@@ -27,8 +27,6 @@
 #include "GPU/Common/FragmentShaderGenerator.h"
 
 class DrawEngineGLES;
-#include <string>
-
 class Shader;
 class Path;
 struct ShaderLanguageDesc;
@@ -36,39 +34,6 @@ struct ShaderLanguageDesc;
 namespace File {
 class IOFile;
 }
-
-// ---- Sistem parameter efek (modular, diisi pengguna) ----
-// Aplikasi hanya menyediakan sistemnya. Efek sendiri ditulis di shader replace (glsl/fs_*.glsl, vs_*.glsl).
-// Semua file ini per game: glsl/<idgame>/ (tanpa game: glsl/ langsung). Preset tiap game terpisah.
-//  - fx_ui.txt      : daftar kontrol (header/slider/toggle/color) yang tampil di Pengaturan. Diisi pengguna.
-//                     Kalau folder game belum punya, disalin dari glsl/fx_ui.txt (templat bersama).
-//  - fx_tune.txt    : nilai kontrol (KUNCI=NILAI), ditulis otomatis dari Pengaturan.
-//  - fx_defines.txt : daftar "#define NAMA u_fxN.x" otomatis, tinggal disalin ke shader.
-// Tiap slider/toggle memakai satu slot; slot ke-n dikirim sebagai u_fx[n/4].[xyzw][n%4].
-// Kunci khusus NEAR dan FAR juga dikirim ke uniform u_near dan u_far.
-constexpr int FX_VEC_COUNT = 16;                 // u_fx0..u_fx15. HARUS sama dengan kFxVecCount di generator.
-constexpr int FX_SLOT_COUNT = FX_VEC_COUNT * 4;  // 64 nilai
-
-enum class FxCtlType { Header, Slider, Toggle };
-struct FxControl {
-	FxCtlType type = FxCtlType::Slider;
-	std::string key;
-	std::string label;
-	float minV = 0.0f, maxV = 1.0f, defV = 0.0f;
-	int slot = -1;  // -1 untuk header
-};
-struct FxTune {
-	float v[FX_SLOT_COUNT] = {};
-	bool on[FX_SLOT_COUNT] = {};  // salinan bool dari v[] untuk checkbox di UI
-	int version = 0;
-	double lastCheck = -1000.0;
-};
-extern FxTune g_fxTune;
-std::vector<FxControl> FxTuneGetControls();    // salinan daftar kontrol saat ini
-void FxTuneLoadNow();                          // baca ulang fx_ui.txt dan fx_tune.txt sekarang juga
-void FxTuneSave();                             // tulis nilai ke fx_tune.txt
-void FxTuneResetSlots(int firstSlot, int endSlot);  // kembalikan slot [first, end) ke nilai bawaan
-void FxTuneResetAll();
 
 class LinkedShader {
 public:
@@ -114,8 +79,6 @@ public:
 	// Parameter efek (jarak near/far untuk blur dunia), dibaca dari glsl/fx_params.txt.
 	int u_near = -1;
 	int u_far = -1;
-	// Parameter efek u_fx0..u_fx15, nilainya dari kontrol di glsl/fx_ui.txt.
-	int u_fx[FX_VEC_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 	int fxParamsVersion_ = -1;
 
 	int u_rasterOffset;
