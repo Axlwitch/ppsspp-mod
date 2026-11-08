@@ -25,6 +25,9 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <string>
+#include <vector>
 #include <sstream>
 
 #include "Common/Data/Convert/SmallDataConvert.h"
@@ -46,6 +49,7 @@
 #include "Common/File/FileUtil.h"
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
+#include "Core/ELF/ParamSFO.h"
 #include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
@@ -74,68 +78,40 @@ Shader::~Shader() {
 	render_->DeleteShader(shader);
 }
 
-// ---- Tuning efek shader ----
-// Nilai diatur dari UI (Settings > Graphics > FX Tune) dan disimpan ke <glsl>/fx_tune.txt
-// (format KEY=VALUE, '#' = komentar). File dicek ulang tiap ~1 detik, jadi bisa juga diedit
-// manual saat game jalan. Kalau fx_tune.txt belum ada, near/far dibaca dari fx_params.txt lama.
+// ---- Sistem parameter efek ----
+// Daftar kontrol dibaca dari <glsl>/<idgame>/fx_ui.txt, nilainya dari/ke <glsl>/<idgame>/fx_tune.txt
+// (KUNCI=NILAI, '#' = komentar). Tanpa game (menu utama) dipakai folder <glsl>/ langsung.
+// Kedua file dicek ulang tiap ~1 detik, jadi bisa diedit manual saat game jalan.
 #if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
 #define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
 #endif
 
-const char *const kFxNames[FX_TUNE_COUNT] = {
-	"NORMAL_BLEND", "NORMAL_Y_SIGN", "SPHERE_FLIP_Y", "SPHERE_ORIG",
-	"MATCAP_EXPOSURE", "MATCAP_MIX", "MATCAP_CONTRAST", "SPEC_GAIN",
-	"BASE_GAIN", "CAVITY_DARK", "ATLAS_CUTOFF", "GREEN_LO",
-	"GREEN_HI", "GOLD_GAIN", "GOLD_BASE_DARK", "EMIS_R",
-	"EMIS_G", "EMIS_B", "EMIS2_R", "EMIS2_G",
-	"EMIS2_B", "EMIS_SPEED", "EMIS_PULSE_SPEED", "EMIS_FLOW_SPEED",
-	"FLOW_FREQ", "FLOW_MIX", "EMIS_ENERGY_MIN", "EMIS_SHIFT",
-	"SHIFT_START", "SHIFT_END", "RIM_CONTRAST", "RIM_TINT_R",
-	"RIM_TINT_G", "RIM_MATCAP", "RIM_SCREEN", "RIM_POWER",
-	"RIM_GAIN", "RIM_R", "RIM_G", "RIM_B",
-	"FAR_NEAR", "FAR_FAR", "BLUR_START", "BLUR_RADIUS",
-	"ON_ATLAS", "ON_RIM", "ON_BLUR", "BLUR_HQ",
-	"ON_CUTOUT" };
-const char *const kFxLabels[FX_TUNE_COUNT] = {
-	"Kekuatan relief (normal map)", "Arah relief (1 normal, -1 terbalik)",
-	"Balik pantulan atas-bawah (0 mati, 1 hidup)", "Cara hitung pantulan (0 baku, 1 alternatif)",
-	"Terang pantulan", "Kekuatan pantulan",
-	"Ketajaman pantulan", "Kilau tajam",
-	"Terang warna dasar", "Gelap di lekukan (kecil = lebih gelap)",
-	"Batas transparan (di bawah ini dibuang)", "Emisif: mulai terdeteksi",
-	"Emisif: terdeteksi penuh", "Emisif: terang",
-	"Emisif: redam warna dasar (kecil = lebih gelap)", "Warna A: merah",
-	"Warna A: hijau", "Warna A: biru",
-	"Warna B: merah", "Warna B: hijau",
-	"Warna B: biru", "Kecepatan animasi (semua)",
-	"Kecepatan denyut", "Kecepatan aliran",
-	"Kerapatan gelombang aliran", "Denyut atau aliran (0 denyut, 1 aliran)",
-	"Redup terendah", "Seberapa banyak pindah ke warna B",
-	"Mulai pindah ke warna B", "Selesai pindah ke warna B",
-	"Kontras warna", "Penguat merah",
-	"Penguat hijau", "Kilau gradasi",
-	"Campur dengan permukaan layar", "Ketipisan tepi (besar = lebih tipis)",
-	"Terang tepi", "Warna tepi: merah",
-	"Warna tepi: hijau", "Warna tepi: biru",
-	"Mulai kabur (jarak)", "Kabur penuh (jarak)",
-	"Lewati kabur tipis (besar = lebih ringan)", "Kekuatan kabur",
-	"Efek atlas", "Efek rim",
-	"Blur jauh", "Blur halus",
-	"Buang transparan" };
-const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
-const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1, 6, 1, 2, 1, 3, 1, 1, 1, 1, 4, 1, 3, 3, 3, 3, 3, 3, 5, 20, 20, 60, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 8, 3, 2, 2, 2, 2000, 4000, 1, 16, 1, 1, 1, 1, 1 };
-const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0, 2.4f, 1, 0.8f, 0.3f, 1.25f, 0.9f, 0.5f, 0.06f, 0.28f, 1.6f, 0.6f, 1.2f, 0.95f, 0.2f, 0.95f, 0.15f, 0.1f, 1, 4, 3, 18, 0.45f, 0.35f, 1, 0.7f, 0.95f, 1.08f, 1.09f, 1.08f, 0.2f, 0.25f, 3.5f, 0.8f, 1, 1, 1, 400, 900, 0.3f, 8, 1, 0, 1, 0, 1 };
+static const char kFxUiTemplate[] =
+	"# Daftar kontrol efek yang tampil di Pengaturan > Grafik. Isi sendiri sesuai shader kamu.\n"
+	"# Satu baris = satu kontrol. Pemisah: tanda |\n"
+	"#   header|Judul bagian\n"
+	"#   slider|KUNCI|Label|min|maks|bawaan\n"
+	"#   toggle|KUNCI|Label|bawaan (0 atau 1)\n"
+	"#   color|KUNCI|Label|merah|hijau|biru      (jadi 3 slider: KUNCI_R, KUNCI_G, KUNCI_B)\n"
+	"# Tiap slider/toggle memakai 1 slot (maksimal 64). Slot ke-n = u_fx<n/4>.<x,y,z,w>.\n"
+	"# Alias siap pakai (#define) otomatis ditulis ke fx_defines.txt, tinggal disalin ke fs_*.glsl / vs_*.glsl.\n"
+	"# Kunci khusus: NEAR dan FAR juga dikirim ke uniform u_near dan u_far.\n"
+	"#\n"
+	"# Contoh (hapus tanda # di depan untuk memakai):\n"
+	"#header|Efek contoh\n"
+	"#toggle|CONTOH_AKTIF|Nyalakan efek contoh|1\n"
+	"#slider|CONTOH_KEKUATAN|Kekuatan efek|0|1|0.5\n"
+	"#color|CONTOH_WARNA|Warna efek|1|0.8|0.2\n";
 
-static FxTune MakeFxTune() {
-	FxTune t;
-	memcpy(t.v, kFxDef, sizeof(kFxDef));
-	for (int k = 0; k < 5; k++)
-		t.on[k] = t.v[FxToggleIndex(k)] > 0.5f;
-	return t;
-}
-FxTune g_fxTune = MakeFxTune();
+static std::mutex g_fxMutex;
+static std::vector<FxControl> g_fxControls;
+static std::string g_fxUiText;
+static bool g_fxLoadedOnce = false;
 
-static Path FxDir() {
+FxTune g_fxTune;
+
+// Folder dasar glsl (tanpa id game).
+static Path FxRootDir() {
 #ifdef GLSL_REPLACE_DIR
 	return Path(std::string(GLSL_REPLACE_DIR));
 #else
@@ -143,35 +119,264 @@ static Path FxDir() {
 #endif
 }
 
-void FxTuneSave() {
+// ID game yang sedang berjalan (kosong kalau tidak ada game / homebrew tanpa ID), dibersihkan jadi nama folder aman.
+static std::string FxCurrentGameId() {
+	std::string id = g_paramSFO.GetDiscID();
+	std::string r;
+	for (char c : id)
+		if (isalnum((unsigned char)c) || c == '-' || c == '_')
+			r += c;
+	return r;
+}
+
+// Game yang parameternya sedang dimuat. Hanya diubah di FxReloadLocked (g_fxMutex terkunci).
+static std::string g_fxGame;
+
+// Folder parameter saat ini: glsl/<idgame>/ kalau ada game, kalau tidak glsl/.
+static Path FxDir() {
+	if (g_fxGame.empty())
+		return FxRootDir();
+	return FxRootDir() / g_fxGame;
+}
+
+static bool FxReadText(const char *name, std::string *out) {
+	std::ifstream in((FxDir() / std::string(name)).ToString());
+	if (!in.is_open())
+		return false;
+	std::stringstream ss;
+	ss << in.rdbuf();
+	*out = ss.str();
+	return true;
+}
+
+static std::string FxTrim(const std::string &s) {
+	size_t a = 0, b = s.size();
+	while (a < b && isspace((unsigned char)s[a])) a++;
+	while (b > a && isspace((unsigned char)s[b - 1])) b--;
+	return s.substr(a, b - a);
+}
+
+static std::string FxCleanKey(const std::string &k) {
+	std::string r;
+	for (char c : k)
+		if (isalnum((unsigned char)c) || c == '_')
+			r += c;
+	return r;
+}
+
+static std::vector<std::string> FxSplit(const std::string &line) {
+	std::vector<std::string> parts;
+	std::string cur;
+	for (char c : line) {
+		if (c == '|') {
+			parts.push_back(FxTrim(cur));
+			cur.clear();
+		} else {
+			cur += c;
+		}
+	}
+	parts.push_back(FxTrim(cur));
+	return parts;
+}
+
+static float FxNum(const std::vector<std::string> &p, size_t i, float def) {
+	if (i >= p.size() || p[i].empty())
+		return def;
+	return (float)atof(p[i].c_str());
+}
+
+// Urai fx_ui.txt jadi daftar kontrol dan beri nomor slot berurutan.
+static std::vector<FxControl> FxParseUi(const std::string &text) {
+	std::vector<FxControl> out;
+	int slot = 0;
+	std::istringstream in(text);
+	std::string raw;
+	while (std::getline(in, raw)) {
+		std::string line = FxTrim(raw);
+		if (line.empty() || line[0] == '#')
+			continue;
+		std::vector<std::string> p = FxSplit(line);
+		std::string type = p[0];
+		for (char &c : type)
+			c = (char)tolower((unsigned char)c);
+
+		if (type == "header" && p.size() >= 2) {
+			FxControl c;
+			c.type = FxCtlType::Header;
+			c.label = p[1];
+			out.push_back(c);
+		} else if (type == "slider" && p.size() >= 3) {
+			if (slot >= FX_SLOT_COUNT) continue;
+			FxControl c;
+			c.type = FxCtlType::Slider;
+			c.key = FxCleanKey(p[1]);
+			c.label = p[2];
+			c.minV = FxNum(p, 3, 0.0f);
+			c.maxV = FxNum(p, 4, 1.0f);
+			if (c.maxV <= c.minV) c.maxV = c.minV + 1.0f;
+			c.defV = FxNum(p, 5, c.minV);
+			if (c.key.empty()) continue;
+			c.slot = slot++;
+			out.push_back(c);
+		} else if (type == "toggle" && p.size() >= 3) {
+			if (slot >= FX_SLOT_COUNT) continue;
+			FxControl c;
+			c.type = FxCtlType::Toggle;
+			c.key = FxCleanKey(p[1]);
+			c.label = p[2];
+			c.minV = 0.0f;
+			c.maxV = 1.0f;
+			c.defV = FxNum(p, 3, 0.0f) > 0.5f ? 1.0f : 0.0f;
+			if (c.key.empty()) continue;
+			c.slot = slot++;
+			out.push_back(c);
+		} else if (type == "color" && p.size() >= 3) {
+			std::string base = FxCleanKey(p[1]);
+			if (base.empty() || slot + 3 > FX_SLOT_COUNT) continue;
+			static const char *const suf[3] = { "_R", "_G", "_B" };
+			static const char *const nm[3] = { ": merah", ": hijau", ": biru" };
+			static const float defRGB[3] = { 1.0f, 1.0f, 1.0f };
+			for (int k = 0; k < 3; k++) {
+				FxControl c;
+				c.type = FxCtlType::Slider;
+				c.key = base + suf[k];
+				c.label = p[2] + nm[k];
+				c.minV = 0.0f;
+				c.maxV = 2.0f;
+				c.defV = FxNum(p, 3 + k, defRGB[k]);
+				c.slot = slot++;
+				out.push_back(c);
+			}
+		}
+	}
+	return out;
+}
+
+// Tulis fx_defines.txt: alias siap salin ke shader.
+static void FxWriteDefines(const std::vector<FxControl> &controls) {
+	std::ofstream out((FxDir() / std::string("fx_defines.txt")).ToString());
+	if (!out.is_open())
+		return;
+	static const char comp[4] = { 'x', 'y', 'z', 'w' };
+	out << "// Dibuat otomatis dari fx_ui.txt. Salin yang dibutuhkan ke fs_*.glsl / vs_*.glsl.\n";
+	out << "// Shader harus punya deklarasi uniform yang dipakai (sudah ada di dump): uniform highp vec4 u_fxN;\n";
+	for (const FxControl &c : controls) {
+		if (c.slot < 0)
+			continue;
+		out << "#define FX_" << c.key << " u_fx" << (c.slot / 4) << "." << comp[c.slot % 4] << "   // " << c.label << "\n";
+	}
+}
+
+static void FxSaveLocked() {
+	File::CreateFullPath(FxDir());
 	std::ofstream out((FxDir() / std::string("fx_tune.txt")).ToString());
 	if (!out.is_open())
 		return;
-	for (int i = 0; i < FX_TUNE_COUNT; i++)
-		out << kFxNames[i] << "=" << g_fxTune.v[i] << "\n";
+	for (const FxControl &c : g_fxControls)
+		if (c.slot >= 0)
+			out << c.key << "=" << g_fxTune.v[c.slot] << "\n";
 	g_fxTune.lastCheck = time_now_d();  // jangan langsung dibaca ulang
 }
 
-void FxTuneSyncToggles() {
-	for (int k = 0; k < 5; k++)
-		g_fxTune.on[k] = g_fxTune.v[FxToggleIndex(k)] > 0.5f;
+// Muat fx_ui.txt (kalau berubah atau force) lalu nilai dari fx_tune.txt. Panggil dengan g_fxMutex terkunci.
+static void FxReloadLocked(bool force) {
+	// Ganti game = ganti folder (glsl/<idgame>/), jadi daftar kontrol dan nilainya ikut berganti.
+	const std::string gid = FxCurrentGameId();
+	if (!g_fxLoadedOnce || gid != g_fxGame) {
+		g_fxGame = gid;
+		force = true;
+	}
+
+	bool uiChanged = false;
+	std::string text;
+	if (!FxReadText("fx_ui.txt", &text)) {
+		// Folder game belum punya fx_ui.txt: salin dari glsl/fx_ui.txt (templat bersama) kalau ada,
+		// kalau tidak pakai templat bawaan. Hasilnya ditulis ke folder game supaya bisa diedit per game.
+		File::CreateFullPath(FxDir());
+		std::string shared;
+		std::ifstream sharedIn((FxRootDir() / std::string("fx_ui.txt")).ToString());
+		if (!g_fxGame.empty() && sharedIn.is_open()) {
+			std::stringstream ss;
+			ss << sharedIn.rdbuf();
+			shared = ss.str();
+		}
+		text = shared.empty() ? std::string(kFxUiTemplate) : shared;
+		std::ofstream out((FxDir() / std::string("fx_ui.txt")).ToString());
+		if (out.is_open())
+			out << text;
+	}
+	if (force || !g_fxLoadedOnce || text != g_fxUiText) {
+		g_fxUiText = text;
+		g_fxControls = FxParseUi(text);
+		FxWriteDefines(g_fxControls);
+		uiChanged = true;
+	}
+	g_fxLoadedOnce = true;
+
+	// Nilai: bawaan kontrol, ditimpa isi fx_tune.txt kalau kuncinya ada.
+	std::map<std::string, float> saved;
+	std::string tuneText;
+	if (FxReadText("fx_tune.txt", &tuneText)) {
+		std::istringstream in(tuneText);
+		std::string line;
+		while (std::getline(in, line)) {
+			size_t c = line.find('#');
+			if (c != std::string::npos)
+				line.resize(c);
+			size_t eq = line.find('=');
+			if (eq == std::string::npos)
+				continue;
+			std::string key = FxTrim(line.substr(0, eq));
+			std::string val = FxTrim(line.substr(eq + 1));
+			if (!key.empty() && !val.empty())
+				saved[key] = (float)atof(val.c_str());
+		}
+	}
+	float nv[FX_SLOT_COUNT] = {};
+	for (const FxControl &c : g_fxControls) {
+		if (c.slot < 0)
+			continue;
+		auto it = saved.find(c.key);
+		nv[c.slot] = it != saved.end() ? it->second : c.defV;
+	}
+	if (uiChanged || memcmp(nv, g_fxTune.v, sizeof(nv)) != 0) {
+		memcpy(g_fxTune.v, nv, sizeof(nv));
+		for (int i = 0; i < FX_SLOT_COUNT; i++)
+			g_fxTune.on[i] = g_fxTune.v[i] > 0.5f;
+		g_fxTune.version++;
+	}
 }
 
-// Kembalikan sebagian nilai ke bawaan: indeks [from, to).
-void FxTuneResetRange(int from, int to) {
-	if (from < 0 || to > FX_TUNE_COUNT || from >= to)
-		return;
-	memcpy(&g_fxTune.v[from], &kFxDef[from], (to - from) * sizeof(float));
-	FxTuneSyncToggles();
-	g_fxTune.version++;
-	FxTuneSave();
+std::vector<FxControl> FxTuneGetControls() {
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	return g_fxControls;
 }
 
-void FxTuneReset() {
-	memcpy(g_fxTune.v, kFxDef, sizeof(kFxDef));
-	FxTuneSyncToggles();
+void FxTuneLoadNow() {
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	FxReloadLocked(true);
+	g_fxTune.lastCheck = time_now_d();
+}
+
+void FxTuneSave() {
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	FxSaveLocked();
+}
+
+void FxTuneResetSlots(int firstSlot, int endSlot) {
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	for (const FxControl &c : g_fxControls) {
+		if (c.slot >= firstSlot && c.slot < endSlot) {
+			g_fxTune.v[c.slot] = c.defV;
+			g_fxTune.on[c.slot] = c.defV > 0.5f;
+		}
+	}
 	g_fxTune.version++;
-	FxTuneSave();
+	FxSaveLocked();
+}
+
+void FxTuneResetAll() {
+	FxTuneResetSlots(0, FX_SLOT_COUNT);
 }
 
 static void RefreshFxTune() {
@@ -179,43 +384,29 @@ static void RefreshFxTune() {
 	if (now - g_fxTune.lastCheck < 1.0)
 		return;
 	g_fxTune.lastCheck = now;
-
-	float nv[FX_TUNE_COUNT];
-	memcpy(nv, g_fxTune.v, sizeof(nv));
-	std::ifstream in((FxDir() / std::string("fx_tune.txt")).ToString());
-	if (in.is_open()) {
-		std::string line;
-		while (std::getline(in, line)) {
-			size_t c = line.find('#');
-			if (c != std::string::npos)
-				line.resize(c);
-			for (char &ch : line)
-				if (ch == '=')
-					ch = ' ';
-			std::istringstream ss(line);
-			std::string key;
-			float val;
-			if (!(ss >> key >> val))
-				continue;
-			for (int i = 0; i < FX_TUNE_COUNT; i++)
-				if (key == kFxNames[i])
-					nv[i] = val;
-		}
-	} else {
-		// Kompatibilitas: fx_params.txt lama berisi "near far".
-		std::ifstream old((FxDir() / std::string("fx_params.txt")).ToString());
-		float n = 0.0f, f = 0.0f;
-		if (old.is_open() && (old >> n >> f) && f > n && n >= 0.0f) {
-			nv[40] = n;
-			nv[41] = f;
-		}
-	}
-	if (memcmp(nv, g_fxTune.v, sizeof(nv)) != 0) {
-		memcpy(g_fxTune.v, nv, sizeof(nv));
-		FxTuneSyncToggles();
-		g_fxTune.version++;
-	}
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	FxReloadLocked(false);
 }
+
+// Nilai kontrol bernama NEAR / FAR (kalau ada) untuk uniform u_near / u_far.
+static void FxNearFar(float *nearV, float *farV) {
+	*nearV = 400.0f;
+	*farV = 900.0f;
+	std::lock_guard<std::mutex> lk(g_fxMutex);
+	for (const FxControl &c : g_fxControls) {
+		if (c.slot < 0)
+			continue;
+		if (c.key == "NEAR")
+			*nearV = g_fxTune.v[c.slot];
+		else if (c.key == "FAR")
+			*farV = g_fxTune.v[c.slot];
+	}
+	*farV = std::max(*farV, *nearV + 1.0f);  // smoothstep butuh far > near
+}
+
+static const char *const kFxUniformNames[FX_VEC_COUNT] = {
+	"u_fx0", "u_fx1", "u_fx2", "u_fx3", "u_fx4", "u_fx5", "u_fx6", "u_fx7",
+	"u_fx8", "u_fx9", "u_fx10", "u_fx11", "u_fx12", "u_fx13", "u_fx14", "u_fx15" };
 
 LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, FShaderID FSID, Shader *fs, bool useHWTransform, bool preloading)
 		: render_(render), useHWTransform_(useHWTransform) {
@@ -271,19 +462,8 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_time, "u_time" });
 	queries.push_back({ &u_near, "u_near" });
 	queries.push_back({ &u_far, "u_far" });
-	queries.push_back({ &u_fx[0], "u_fx0" });
-	queries.push_back({ &u_fx[1], "u_fx1" });
-	queries.push_back({ &u_fx[2], "u_fx2" });
-	queries.push_back({ &u_fx[3], "u_fx3" });
-	queries.push_back({ &u_fx[4], "u_fx4" });
-	queries.push_back({ &u_fx[5], "u_fx5" });
-	queries.push_back({ &u_fx[6], "u_fx6" });
-	queries.push_back({ &u_fx[7], "u_fx7" });
-	queries.push_back({ &u_fx[8], "u_fx8" });
-	queries.push_back({ &u_fx[9], "u_fx9" });
-	queries.push_back({ &u_fx[10], "u_fx10" });
-	queries.push_back({ &u_fx[11], "u_fx11" });
-	queries.push_back({ &u_fx[12], "u_fx12" });
+	for (int i = 0; i < FX_VEC_COUNT; i++)
+		queries.push_back({ &u_fx[i], kFxUniformNames[i] });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -528,7 +708,7 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		flatScreen = IsFlatVRScene();
 	}
 
-	// u_near / u_far / u_fx0..6: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya
+	// u_near / u_far / u_fx0..15: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya
 	// berubah (version naik) atau program ini baru dipakai pertama kali.
 	bool fxAny = (u_near != -1 || u_far != -1);
 	for (int i = 0; i < FX_VEC_COUNT; i++)
@@ -537,8 +717,8 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		RefreshFxTune();
 		if (fxParamsVersion_ != g_fxTune.version) {
 			fxParamsVersion_ = g_fxTune.version;
-			float nearV = g_fxTune.v[40];
-			float farV = std::max(g_fxTune.v[41], nearV + 1.0f);  // smoothstep butuh far > near
+			float nearV, farV;
+			FxNearFar(&nearV, &farV);
 			if (u_near != -1)
 				render_->SetUniformF(&u_near, 1, &nearV);
 			if (u_far != -1)
