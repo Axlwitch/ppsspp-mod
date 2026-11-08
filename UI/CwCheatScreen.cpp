@@ -41,6 +41,7 @@
 #include "Common/DbgNew.h"
 #include "UI/GameInfoCache.h"
 #include "UI/CwCheatScreen.h"
+#include "UI/MemScanScreen.h"
 #include "UI/MiscViews.h"
 
 static const int FILE_CHECK_FRAME_INTERVAL = 53;
@@ -254,6 +255,9 @@ void CwCheatScreen::CreateSettingsViews(UI::ViewGroup *leftColumn) {
 	leftColumn->Add(new Choice(cw->T("Edit Cheat File")))->OnClick.Handle(this, &CwCheatScreen::OnEditCheatFile);
 #endif
 	leftColumn->Add(new Choice(di->T("Disable All")))->OnClick.Handle(this, &CwCheatScreen::OnDisableAll);
+	leftColumn->Add(new Choice("Cari Memori / Widescreen"))->OnClick.Add([this](UI::EventParams &) {
+		screenManager()->push(new MemScanScreen(gamePath_, gameID_));
+	});
 	leftColumn->Add(new PopupSliderChoice(&g_Config.iCwCheatRefreshIntervalMs, 1, 1000, 77, cw->T("Refresh interval"), 1, screenManager()))->SetFormat(di->T("%d ms"));
 }
 
