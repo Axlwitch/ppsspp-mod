@@ -19,6 +19,7 @@
 #include "ppsspp_config.h"
 
 #include <algorithm>
+#include <functional>
 #include <set>
 
 #include "Common/Net/Resolve.h"
@@ -378,47 +379,69 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 
 	graphicsSettings->Add(new CheckBox(&g_Config.bReplaceTextures, dev->T("Replace textures")));
 
-	// Tuning efek shader (flag 1 = model, flag 2 = dunia). Disimpan ke glsl/fx_tune.txt.
-	for (int i = 0; i < FX_TUNE_COUNT; i++) {
-		if (i == 0)
-			graphicsSettings->Add(new ItemHeader("FX Tune: model (flag 1)"));
-		else if (i == 16)
-			graphicsSettings->Add(new ItemHeader("FX Tune: dunia / blur jauh (flag 2)"));
-		else if (i == 20)
-			graphicsSettings->Add(new ItemHeader("FX Tune: emisif model (warna & kecepatan)"));
-		else if (i == 28)
-			graphicsSettings->Add(new ItemHeader("FX Tune: saklar efek (mati = shader default)"));
-		else if (i == 32)
-			graphicsSettings->Add(new ItemHeader("FX Tune: emisif area gelap (flag 1 tanpa atlas)"));
-		else if (i == 44)
-			graphicsSettings->Add(new ItemHeader("FX Tune: rim + matcap (flag 1 tanpa atlas)"));
-		if ((i >= 28 && i < 32) || i == 44) {
-			static const char *const kToggleLabels[5] = {
-				"Efek atlas (flag 1)",
-				"Efek emisif area gelap (flag 1)",
-				"Blur jarak jauh (flag 2)",
-				"Blur kualitas tinggi 5 tap (flag 2, lebih berat)",
-				"Efek rim + matcap (flag 1)" };
-			const int k = (i == 44) ? 4 : i - 28;
-			CheckBox *fxToggle = graphicsSettings->Add(new CheckBox(&g_fxTune.on[k], kToggleLabels[k]));
-			fxToggle->OnClick.Add([k](UI::EventParams &e) {
+	// Pengaturan efek shader. Tiap bagian: judul, saklar nyala/mati, lalu slider-nya.
+	// Slider ikut redup kalau efeknya dimatikan. Efek mati = tampilan asli game.
+	{
+		auto addFxToggle = [&](int k, const char *label) -> CheckBox * {
+			CheckBox *cb = graphicsSettings->Add(new CheckBox(&g_fxTune.on[k], label));
+			cb->OnClick.Add([k](UI::EventParams &e) {
 				g_fxTune.v[FxToggleIndex(k)] = g_fxTune.on[k] ? 1.0f : 0.0f;
 				g_fxTune.version++;
 				FxTuneSave();
 			});
-			continue;
-		}
-		PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[i], kFxMin[i], kFxMax[i], kFxDef[i], kFxNames[i], (kFxMax[i] - kFxMin[i]) / 100.0f, screenManager(), ""));
-		fx->OnChange.Add([](UI::EventParams &e) {
-			g_fxTune.version++;
-			FxTuneSave();
+			return cb;
+		};
+		auto addFxSliders = [&](int from, int to, std::function<bool()> enabled) {
+			for (int i = from; i < to; i++) {
+				PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[i], kFxMin[i], kFxMax[i], kFxDef[i], kFxLabels[i], (kFxMax[i] - kFxMin[i]) / 100.0f, screenManager(), ""));
+				fx->SetEnabledFunc(enabled);
+				fx->OnChange.Add([](UI::EventParams &e) {
+					g_fxTune.version++;
+					FxTuneSave();
+				});
+			}
+		};
+		auto addFxReset = [&](int from, int to) {
+			Choice *reset = graphicsSettings->Add(new Choice("Kembalikan ke bawaan (bagian ini)"));
+			reset->OnClick.Add([this, from, to](UI::EventParams &e) {
+				FxTuneResetRange(from, to);
+				RecreateViews();
+			});
+		};
+		auto atlasOn = []() { return g_fxTune.on[0]; };
+
+		graphicsSettings->Add(new ItemHeader("1. Efek Atlas (butuh tekstur atlas)"));
+		addFxToggle(0, "Nyalakan efek atlas");
+		addFxToggle(4, "Buang bagian transparan (jaga area bolong tetap bolong)")->SetEnabledFunc(atlasOn);
+		addFxSliders(0, 10, atlasOn);
+		addFxSliders(10, 11, []() { return g_fxTune.on[0] && g_fxTune.on[4]; });
+		addFxReset(0, 11);
+
+		graphicsSettings->Add(new ItemHeader("1a. Atlas: area yang menyala (emisif)"));
+		addFxSliders(11, 15, atlasOn);
+		graphicsSettings->Add(new ItemHeader("1b. Atlas: warna nyala"));
+		addFxSliders(15, 21, atlasOn);
+		graphicsSettings->Add(new ItemHeader("1c. Atlas: gerak dan pergantian warna"));
+		addFxSliders(21, 30, atlasOn);
+		addFxReset(11, 30);
+
+		graphicsSettings->Add(new ItemHeader("2. Efek Rim (model tanpa atlas)"));
+		addFxToggle(1, "Nyalakan efek rim");
+		addFxSliders(30, 40, []() { return g_fxTune.on[1]; });
+		addFxReset(30, 40);
+
+		graphicsSettings->Add(new ItemHeader("3. Blur Jauh / DOF (dunia)"));
+		addFxToggle(2, "Nyalakan blur jauh");
+		addFxToggle(3, "Blur lebih halus (lebih berat)")->SetEnabledFunc([]() { return g_fxTune.on[2]; });
+		addFxSliders(40, 44, []() { return g_fxTune.on[2]; });
+		addFxReset(40, 44);
+
+		Choice *fxReset = graphicsSettings->Add(new Choice("Kembalikan SEMUA efek ke bawaan"));
+		fxReset->OnClick.Add([this](UI::EventParams &e) {
+			FxTuneReset();
+			RecreateViews();
 		});
 	}
-	Choice *fxReset = graphicsSettings->Add(new Choice("FX Tune: reset default"));
-	fxReset->OnClick.Add([this](UI::EventParams &e) {
-		FxTuneReset();
-		RecreateViews();
-	});
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Display")));
 
