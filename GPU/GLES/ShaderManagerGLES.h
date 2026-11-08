@@ -36,34 +36,30 @@ class IOFile;
 }
 
 // ---- Tuning efek shader (UI + glsl/fx_tune.txt) ----
-// Nilai i dikirim sebagai u_fx[i/4][i%4]:
-//  0..15  = parameter model (flag 1)      -> u_fx0..u_fx3
-//  16..19 = near, far, blur start, radius (flag 2) -> u_fx4
-//  20..23 = warna emisif 1 (RGB) + kecepatan  -> u_fx5
-//  24..27 = warna emisif 2 (RGB) + jumlah pergeseran warna -> u_fx6
-//  28..31 = saklar: atlas, emisif area gelap, blur jauh (flag 2), blur kualitas tinggi -> u_fx7
-//  32..35 = emisif gelap: warna 1 (RGB) + kecepatan -> u_fx8
-//  36..39 = emisif gelap: warna 2 (RGB) + jumlah pergeseran -> u_fx9
-//  40..43 = emisif gelap: batas gelap lo, hi, gain, kontras dasar -> u_fx10
-//  44..47 = rim: saklar, kontras, gain R, gain G -> u_fx11
-//  48..51 = rim: matcap, pangkat fresnel, gain fresnel, campur normal layar -> u_fx12
-constexpr int FX_TUNE_COUNT = 52;
-constexpr int FX_VEC_COUNT = FX_TUNE_COUNT / 4;
-// Indeks di v[] untuk saklar ke-k: 28..31 lalu 44 (rim).
-inline int FxToggleIndex(int k) { return k < 4 ? 28 + k : 44; }
+// Nilai i dikirim sebagai u_fx[i/4][i%4]. Pembagian:
+//  0..10  = efek atlas (relief, pantulan, kilau, batas transparan)
+//  11..29 = emisif atlas (area, warna A/B, animasi)
+//  30..39 = rim (flag 1, model tanpa atlas)
+//  40..43 = blur jauh (flag 2): near, far, lewati kabur tipis, kekuatan
+//  44..48 = saklar: atlas, rim, blur, blur halus, buang transparan
+constexpr int FX_TUNE_COUNT = 49;
+constexpr int FX_VEC_COUNT = (FX_TUNE_COUNT + 3) / 4;
+inline int FxToggleIndex(int k) { return 44 + k; }
 struct FxTune {
-	float v[FX_TUNE_COUNT];
-	bool on[5] = { true, true, true, false, false };  // salinan bool saklar (lihat FxToggleIndex) untuk UI
+	float v[FX_VEC_COUNT * 4] = {};
+	bool on[5] = { true, false, true, false, true };  // salinan bool dari v[44..48] untuk checkbox UI
 	int version = 0;
 	double lastCheck = -1000.0;
 };
 extern FxTune g_fxTune;
 extern const char *const kFxNames[FX_TUNE_COUNT];
+extern const char *const kFxLabels[FX_TUNE_COUNT];
 extern const float kFxMin[FX_TUNE_COUNT];
 extern const float kFxMax[FX_TUNE_COUNT];
 extern const float kFxDef[FX_TUNE_COUNT];
 void FxTuneSave();
 void FxTuneReset();
+void FxTuneResetRange(int from, int to);
 void FxTuneSyncToggles();
 
 class LinkedShader {

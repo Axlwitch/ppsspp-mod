@@ -85,24 +85,50 @@ Shader::~Shader() {
 const char *const kFxNames[FX_TUNE_COUNT] = {
 	"NORMAL_BLEND", "NORMAL_Y_SIGN", "SPHERE_FLIP_Y", "SPHERE_ORIG",
 	"MATCAP_EXPOSURE", "MATCAP_MIX", "MATCAP_CONTRAST", "SPEC_GAIN",
-	"BASE_GAIN", "CAVITY_DARK", "GOLD_GAIN", "GOLD_BASE_DARK",
-	"FLOW_FREQ", "FLOW_MIX", "GREEN_LO", "GREEN_HI",
+	"BASE_GAIN", "CAVITY_DARK", "ATLAS_CUTOFF", "GREEN_LO",
+	"GREEN_HI", "GOLD_GAIN", "GOLD_BASE_DARK", "EMIS_R",
+	"EMIS_G", "EMIS_B", "EMIS2_R", "EMIS2_G",
+	"EMIS2_B", "EMIS_SPEED", "EMIS_PULSE_SPEED", "EMIS_FLOW_SPEED",
+	"FLOW_FREQ", "FLOW_MIX", "EMIS_ENERGY_MIN", "EMIS_SHIFT",
+	"SHIFT_START", "SHIFT_END", "RIM_CONTRAST", "RIM_TINT_R",
+	"RIM_TINT_G", "RIM_MATCAP", "RIM_SCREEN", "RIM_POWER",
+	"RIM_GAIN", "RIM_R", "RIM_G", "RIM_B",
 	"FAR_NEAR", "FAR_FAR", "BLUR_START", "BLUR_RADIUS",
-	"EMIS_R", "EMIS_G", "EMIS_B", "EMIS_SPEED",
-	"EMIS2_R", "EMIS2_G", "EMIS2_B", "EMIS_SHIFT",
-	"ON_ATLAS", "ON_EMISSIVE", "ON_BLUR", "BLUR_HQ",
-	"DK_R1", "DK_G1", "DK_B1", "DK_SPEED",
-	"DK_R2", "DK_G2", "DK_B2", "DK_SHIFT",
-	"DK_LO", "DK_HI", "DK_GAIN", "DK_CONTRAST",
-	"ON_RIM", "RM_CONTRAST", "RM_R", "RM_G",
-	"RM_MATCAP", "RM_POWER", "RM_GAIN", "RM_SCREEN" };
-const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0.5,  0, 0.5f, 0, 0,  0, 0.5f, 0, 0 };
-const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1,  6, 1, 2, 1,  3, 1, 4, 1,  60, 1, 1, 1,  2000, 4000, 1, 16,  3, 3, 3, 5,  3, 3, 3, 1,  1, 1, 1, 1,  3, 3, 3, 5,  3, 3, 3, 1,  1, 1, 6, 2,  1, 2, 2, 2,  2, 8, 3, 1 };
-const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0,  2.4f, 1, 0.8f, 0.30f,  1.25f, 0.9f, 1.6f, 0.6f,  18, 0.45f, 0.06f, 0.28f,  400, 900, 0.30f, 8,  1.2f, 0.95f, 0.2f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f,  1, 1, 1, 0,  0.1f, 0.8f, 0.9f, 1.0f,  0.95f, 0.15f, 0.1f, 1.0f,  0.02f, 0.25f, 2.2f, 1.08f,  0, 1.08f, 1.09f, 1.08f,  0.2f, 3.5f, 0.8f, 0.25f };
+	"ON_ATLAS", "ON_RIM", "ON_BLUR", "BLUR_HQ",
+	"ON_CUTOUT" };
+const char *const kFxLabels[FX_TUNE_COUNT] = {
+	"Kekuatan relief (normal map)", "Arah relief (1 normal, -1 terbalik)",
+	"Balik pantulan atas-bawah (0 mati, 1 hidup)", "Cara hitung pantulan (0 baku, 1 alternatif)",
+	"Terang pantulan", "Kekuatan pantulan",
+	"Ketajaman pantulan", "Kilau tajam",
+	"Terang warna dasar", "Gelap di lekukan (kecil = lebih gelap)",
+	"Batas transparan (di bawah ini dibuang)", "Emisif: mulai terdeteksi",
+	"Emisif: terdeteksi penuh", "Emisif: terang",
+	"Emisif: redam warna dasar (kecil = lebih gelap)", "Warna A: merah",
+	"Warna A: hijau", "Warna A: biru",
+	"Warna B: merah", "Warna B: hijau",
+	"Warna B: biru", "Kecepatan animasi (semua)",
+	"Kecepatan denyut", "Kecepatan aliran",
+	"Kerapatan gelombang aliran", "Denyut atau aliran (0 denyut, 1 aliran)",
+	"Redup terendah", "Seberapa banyak pindah ke warna B",
+	"Mulai pindah ke warna B", "Selesai pindah ke warna B",
+	"Kontras warna", "Penguat merah",
+	"Penguat hijau", "Kilau gradasi",
+	"Campur dengan permukaan layar", "Ketipisan tepi (besar = lebih tipis)",
+	"Terang tepi", "Warna tepi: merah",
+	"Warna tepi: hijau", "Warna tepi: biru",
+	"Mulai kabur (jarak)", "Kabur penuh (jarak)",
+	"Lewati kabur tipis (besar = lebih ringan)", "Kekuatan kabur",
+	"Efek atlas", "Efek rim",
+	"Blur jauh", "Blur halus",
+	"Buang transparan" };
+const float kFxMin[FX_TUNE_COUNT] = { 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 0.5f, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
+const float kFxMax[FX_TUNE_COUNT] = { 1, 1, 1, 1, 6, 1, 2, 1, 3, 1, 1, 1, 1, 4, 1, 3, 3, 3, 3, 3, 3, 5, 20, 20, 60, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 8, 3, 2, 2, 2, 2000, 4000, 1, 16, 1, 1, 1, 1, 1 };
+const float kFxDef[FX_TUNE_COUNT] = { 1, 1, 0, 0, 2.4f, 1, 0.8f, 0.3f, 1.25f, 0.9f, 0.5f, 0.06f, 0.28f, 1.6f, 0.6f, 1.2f, 0.95f, 0.2f, 0.95f, 0.15f, 0.1f, 1, 4, 3, 18, 0.45f, 0.35f, 1, 0.7f, 0.95f, 1.08f, 1.09f, 1.08f, 0.2f, 0.25f, 3.5f, 0.8f, 1, 1, 1, 400, 900, 0.3f, 8, 1, 0, 1, 0, 1 };
 
 static FxTune MakeFxTune() {
 	FxTune t;
-	memcpy(t.v, kFxDef, sizeof(t.v));
+	memcpy(t.v, kFxDef, sizeof(kFxDef));
 	for (int k = 0; k < 5; k++)
 		t.on[k] = t.v[FxToggleIndex(k)] > 0.5f;
 	return t;
@@ -129,6 +155,16 @@ void FxTuneSave() {
 void FxTuneSyncToggles() {
 	for (int k = 0; k < 5; k++)
 		g_fxTune.on[k] = g_fxTune.v[FxToggleIndex(k)] > 0.5f;
+}
+
+// Kembalikan sebagian nilai ke bawaan: indeks [from, to).
+void FxTuneResetRange(int from, int to) {
+	if (from < 0 || to > FX_TUNE_COUNT || from >= to)
+		return;
+	memcpy(&g_fxTune.v[from], &kFxDef[from], (to - from) * sizeof(float));
+	FxTuneSyncToggles();
+	g_fxTune.version++;
+	FxTuneSave();
 }
 
 void FxTuneReset() {
@@ -170,8 +206,8 @@ static void RefreshFxTune() {
 		std::ifstream old((FxDir() / std::string("fx_params.txt")).ToString());
 		float n = 0.0f, f = 0.0f;
 		if (old.is_open() && (old >> n >> f) && f > n && n >= 0.0f) {
-			nv[16] = n;
-			nv[17] = f;
+			nv[40] = n;
+			nv[41] = f;
 		}
 	}
 	if (memcmp(nv, g_fxTune.v, sizeof(nv)) != 0) {
@@ -501,8 +537,8 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		RefreshFxTune();
 		if (fxParamsVersion_ != g_fxTune.version) {
 			fxParamsVersion_ = g_fxTune.version;
-			float nearV = g_fxTune.v[16];
-			float farV = std::max(g_fxTune.v[17], nearV + 1.0f);  // smoothstep butuh far > near
+			float nearV = g_fxTune.v[40];
+			float farV = std::max(g_fxTune.v[41], nearV + 1.0f);  // smoothstep butuh far > near
 			if (u_near != -1)
 				render_->SetUniformF(&u_near, 1, &nearV);
 			if (u_far != -1)
