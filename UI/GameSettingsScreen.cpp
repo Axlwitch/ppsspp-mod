@@ -19,7 +19,6 @@
 #include "ppsspp_config.h"
 
 #include <algorithm>
-#include <functional>
 #include <set>
 
 #include "Common/Net/Resolve.h"
@@ -83,7 +82,6 @@
 #include "Core/Util/PortManager.h"
 #include "GPU/Common/PostShader.h"
 #include "GPU/GPU.h"
-#include "GPU/GLES/ShaderManagerGLES.h"
 
 #if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
 #include "Core/Util/DarwinFileSystemServices.h"
@@ -378,73 +376,6 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
 
 	graphicsSettings->Add(new CheckBox(&g_Config.bReplaceTextures, dev->T("Replace textures")));
-
-	// Pengaturan efek shader. Daftar kontrol dibaca dari glsl/fx_ui.txt (diisi pengguna);
-	// aplikasi hanya menyediakan sistemnya. Nilai disimpan ke glsl/fx_tune.txt.
-	{
-		FxTuneLoadNow();
-		const std::vector<FxControl> fxControls = FxTuneGetControls();
-
-		graphicsSettings->Add(new ItemHeader("Efek Shader (daftar dari glsl/fx_ui.txt)"));
-
-		bool anyControl = false;
-		for (const FxControl &c : fxControls)
-			anyControl = anyControl || c.slot >= 0;
-		if (!anyControl) {
-			graphicsSettings->Add(new UI::TextView("Belum ada kontrol. Isi glsl/fx_ui.txt (contoh format ada di dalam file), lalu tekan Muat ulang.", new UI::LinearLayoutParams(UI::WRAP_CONTENT, UI::WRAP_CONTENT, UI::Margins(8, 8, 8, 8))));
-		}
-
-		auto addFxReset = [&](int first, int end) {
-			Choice *reset = graphicsSettings->Add(new Choice("Kembalikan ke bawaan (bagian ini)"));
-			reset->OnClick.Add([this, first, end](UI::EventParams &e) {
-				FxTuneResetSlots(first, end);
-				RecreateViews();
-			});
-		};
-
-		int secFirst = -1, secEnd = 0;
-		for (const FxControl &c : fxControls) {
-			if (c.type == FxCtlType::Header) {
-				if (secFirst >= 0)
-					addFxReset(secFirst, secEnd);
-				secFirst = -1;
-				graphicsSettings->Add(new ItemHeader(c.label));
-			} else if (c.type == FxCtlType::Toggle) {
-				if (secFirst < 0) secFirst = c.slot;
-				secEnd = c.slot + 1;
-				const int slot = c.slot;
-				CheckBox *cb = graphicsSettings->Add(new CheckBox(&g_fxTune.on[slot], c.label));
-				cb->OnClick.Add([slot](UI::EventParams &e) {
-					g_fxTune.v[slot] = g_fxTune.on[slot] ? 1.0f : 0.0f;
-					g_fxTune.version++;
-					FxTuneSave();
-				});
-			} else {
-				if (secFirst < 0) secFirst = c.slot;
-				secEnd = c.slot + 1;
-				PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[c.slot], c.minV, c.maxV, c.defV, c.label, (c.maxV - c.minV) / 100.0f, screenManager(), ""));
-				fx->OnChange.Add([](UI::EventParams &e) {
-					g_fxTune.version++;
-					FxTuneSave();
-				});
-			}
-		}
-		if (secFirst >= 0)
-			addFxReset(secFirst, secEnd);
-
-		Choice *fxReload = graphicsSettings->Add(new Choice("Muat ulang fx_ui.txt"));
-		fxReload->OnClick.Add([this](UI::EventParams &e) {
-			FxTuneLoadNow();
-			RecreateViews();
-		});
-		if (anyControl) {
-			Choice *fxReset = graphicsSettings->Add(new Choice("Kembalikan SEMUA efek ke bawaan"));
-			fxReset->OnClick.Add([this](UI::EventParams &e) {
-				FxTuneResetAll();
-				RecreateViews();
-			});
-		}
-	}
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Display")));
 
