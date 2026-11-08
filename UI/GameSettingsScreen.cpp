@@ -430,12 +430,6 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 		addFxSliders(30, 40, []() { return g_fxTune.on[1]; });
 		addFxReset(30, 40);
 
-		graphicsSettings->Add(new ItemHeader("3. Blur Jauh / DOF (dunia)"));
-		addFxToggle(2, "Nyalakan blur jauh");
-		addFxToggle(3, "Blur lebih halus (lebih berat)")->SetEnabledFunc([]() { return g_fxTune.on[2]; });
-		addFxSliders(40, 44, []() { return g_fxTune.on[2]; });
-		addFxReset(40, 44);
-
 		Choice *fxReset = graphicsSettings->Add(new Choice("Kembalikan SEMUA efek ke bawaan"));
 		fxReset->OnClick.Add([this](UI::EventParams &e) {
 			FxTuneReset();
