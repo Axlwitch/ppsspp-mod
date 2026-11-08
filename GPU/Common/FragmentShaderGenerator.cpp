@@ -166,31 +166,6 @@ static const char kFxSample[] = R"FXGLSL(
     fxN = fxApplyNormalMap(fxN0, fxDp1, fxDp2, fxDx, fxDy, fxNmv);
   } else {
     t = textureGrad(tex, fxUv, fxDx, fxDy);
-    highp float fxCoc = (FX_ON_BLUR > 0.5) ? getFarBlur() : 0.0;
-    if (fxCoc > FX_BLUR_START) {
-      highp float fxR = fxCoc * FX_BLUR_RADIUS;
-      highp float fxNz = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-      highp float fxA = fxNz * 6.2831853;
-      highp vec2 fxGx = fxDx * (1.0 + fxR * 0.5);
-      highp vec2 fxGy = fxDy * (1.0 + fxR * 0.5);
-      if (FX_BLUR_HQ > 0.5) {
-        highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * fxR;
-        highp vec2 fxS = vec2(-fxC.y, fxC.x);
-        highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
-        highp vec2 fxU2 = fxDx * fxS.x + fxDy * fxS.y;
-        t = 0.2 * t
-          + 0.2 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
-          + 0.2 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy)
-          + 0.2 * textureGrad(tex, fxUv + fxU2, fxGx, fxGy)
-          + 0.2 * textureGrad(tex, fxUv - fxU2, fxGx, fxGy);
-      } else {
-        highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * (fxR * 1.3);
-        highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
-        t = 0.4 * t
-          + 0.3 * textureGrad(tex, fxUv + fxU1, fxGx, fxGy)
-          + 0.3 * textureGrad(tex, fxUv - fxU1, fxGx, fxGy);
-      }
-    }
   }
 )FXGLSL";
 static const char kFxPost[] = R"FXGLSL(
@@ -644,9 +619,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
 		WRITE(p, "uniform highp float u_time;\n");
-		// Batas jarak (view-space) untuk efek blur jauh, dari glsl/fx_params.txt (lihat ShaderManagerGLES).
-		WRITE(p, "uniform highp float u_near;\n");
-		WRITE(p, "uniform highp float u_far;\n");
 
 		if (compat.glslES30) {
 			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
@@ -664,13 +636,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
 			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
 			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
-			WRITE(p, "}\n");
-
-			// Kekuatan blur jarak jauh, 0..1. Hanya untuk dunia (flag 2); model, HUD, partikel = 0.
-			// 0 saat jarak <= u_near, 1 saat jarak >= u_far.
-			WRITE(p, "highp float getFarBlur() {\n");
-			WRITE(p, "  if (flag != 2) return 0.0;\n");
-			WRITE(p, "  return smoothstep(u_near, u_far, abs(v_3.z));\n");
 			WRITE(p, "}\n");
 		}
 		if (fxEnableHelpers) {
