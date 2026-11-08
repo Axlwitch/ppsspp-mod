@@ -44,177 +44,9 @@
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
 
-// ---- Efek model (flag 1) & dunia (flag 2), ditanam langsung di generator ----
-// Parameter tuning dikirim dari ShaderManagerGLES (g_fxTune) lewat uniform u_fx0..u_fx6,
-// diatur dari Settings > Graphics > FX Tune atau glsl/fx_tune.txt. Tidak perlu fs*.glsl replace.
-static const char kFxHelpers[] = R"FXGLSL(
-uniform highp vec4 u_fx0;
-uniform highp vec4 u_fx1;
-uniform highp vec4 u_fx2;
-uniform highp vec4 u_fx3;
-uniform highp vec4 u_fx4;
-uniform highp vec4 u_fx5;
-uniform highp vec4 u_fx6;
-uniform highp vec4 u_fx7;
-uniform highp vec4 u_fx8;
-uniform highp vec4 u_fx9;
-uniform highp vec4 u_fx10;
-uniform highp vec4 u_fx11;
-uniform highp vec4 u_fx12;
-#define FX_NORMAL_BLEND     u_fx0.x
-#define FX_NORMAL_Y_SIGN    u_fx0.y
-#define FX_SPHERE_FLIP_Y    u_fx0.z
-#define FX_SPHERE_ORIG      u_fx0.w
-#define FX_MATCAP_EXPOSURE  u_fx1.x
-#define FX_MATCAP_MIX       u_fx1.y
-#define FX_MATCAP_CONTRAST  u_fx1.z
-#define FX_SPEC_GAIN        u_fx1.w
-#define FX_BASE_GAIN        u_fx2.x
-#define FX_CAVITY_DARK      u_fx2.y
-#define FX_ATLAS_CUTOFF     u_fx2.z
-#define FX_GREEN_LO         u_fx2.w
-#define FX_GREEN_HI         u_fx3.x
-#define FX_GOLD_GAIN        u_fx3.y
-#define FX_GOLD_BASE_DARK   u_fx3.z
-#define FX_EMIS_COLOR1      vec3(u_fx3.w, u_fx4.x, u_fx4.y)
-#define FX_EMIS_COLOR2      vec3(u_fx4.z, u_fx4.w, u_fx5.x)
-#define FX_EMIS_SPEED       u_fx5.y
-#define FX_PULSE_SPEED      u_fx5.z
-#define FX_FLOW_SPEED       u_fx5.w
-#define FX_FLOW_FREQ        u_fx6.x
-#define FX_FLOW_MIX         u_fx6.y
-#define FX_ENERGY_MIN       u_fx6.z
-#define FX_EMIS_SHIFT       u_fx6.w
-#define FX_SHIFT_START      u_fx7.x
-#define FX_SHIFT_END        u_fx7.y
-#define FX_RIM_CONTRAST     u_fx7.z
-#define FX_RIM_TINT_R       u_fx7.w
-#define FX_RIM_TINT_G       u_fx8.x
-#define FX_RIM_MATCAP       u_fx8.y
-#define FX_RIM_SCREEN       u_fx8.z
-#define FX_RIM_POWER        u_fx8.w
-#define FX_RIM_GAIN         u_fx9.x
-#define FX_RIM_COLOR        vec3(u_fx9.y, u_fx9.z, u_fx9.w)
-#define FX_BLUR_START       u_fx10.z
-#define FX_BLUR_RADIUS      u_fx10.w
-#define FX_ON_ATLAS         u_fx11.x
-#define FX_ON_RIM           u_fx11.y
-#define FX_ON_BLUR          u_fx11.z
-#define FX_BLUR_HQ          u_fx11.w
-#define FX_ON_CUTOUT        u_fx12.x
-#define FX_MARK_SIZE_MIN    16
-bool fxIsBlue(mediump vec3 c) { return c.r < 0.1 && c.g < 0.1 && c.b > 0.8; }
-bool fxHasMarker() {
-  ivec2 sz = textureSize(tex, 0);
-  if (min(sz.x, sz.y) < FX_MARK_SIZE_MIN) return false;
-  ivec2 c = sz / 2;
-  return fxIsBlue(texelFetch(tex, c + ivec2(-3, -3), 0).rgb) &&
-         fxIsBlue(texelFetch(tex, c + ivec2( 3,  3), 0).rgb);
-}
-highp vec2 fxQuadUV(highp vec2 uv, highp vec2 origin) {
-  highp vec2 h = 0.5 / vec2(textureSize(tex, 0));
-  return clamp(fract(uv) * 0.5, h, 0.5 - h) + origin;
-}
-mediump vec4 fxCommandTexel(highp vec2 uv) {
-  ivec2 sz = textureSize(tex, 0);
-  ivec2 hs = sz / 2;
-  ivec2 p = clamp(ivec2(fract(uv) * vec2(hs)), ivec2(0), hs - ivec2(1));
-  return texelFetch(tex, p + ivec2(0, hs.y), 0);
-}
-highp vec2 fxSphereUV(highp vec3 u, highp vec3 n) {
-  highp vec3 r = reflect(u, n);
-  highp float z1 = (FX_SPHERE_ORIG > 0.5) ? r.z : (r.z + 1.0);
-  highp float m = 2.0 * sqrt(max(r.x * r.x + r.y * r.y + (r.z + 1.0) * z1, 1e-8));
-  highp float y = r.y / m;
-  return vec2(r.x / m + 0.5, (FX_SPHERE_FLIP_Y > 0.5) ? 0.5 - y : y + 0.5);
-}
-highp vec3 fxApplyNormalMap(highp vec3 N, highp vec3 dp1, highp vec3 dp2, highp vec2 duv1, highp vec2 duv2, highp vec3 nm) {
-  highp vec3 dp2perp = cross(dp2, N);
-  highp vec3 dp1perp = cross(N, dp1);
-  highp vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-  highp vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-  highp float inv = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-12));
-  highp vec3 Nm = normalize(T * (nm.x * inv) + B * (nm.y * inv * FX_NORMAL_Y_SIGN) + N * nm.z);
-  return normalize(mix(N, Nm, FX_NORMAL_BLEND));
-}
-mediump vec3 fxSoftClip(mediump vec3 c) {
-  mediump vec3 over = max(c - 0.8, 0.0);
-  return min(c, vec3(0.8)) + 0.2 * (1.0 - exp(-over * 5.0));
-}
-)FXGLSL";
-static const char kFxSample[] = R"FXGLSL(
-  highp vec2 fxDx = dFdx(fxUv);
-  highp vec2 fxDy = dFdy(fxUv);
-  highp vec3 fxDp1 = dFdx(v_3.xyz);
-  highp vec3 fxDp2 = dFdy(v_3.xyz);
-  bool fxAtlas = (flag == 1) && (FX_ON_ATLAS > 0.5) && fxHasMarker();
-  bool fxRim = (flag == 1) && !fxAtlas && (FX_ON_RIM > 0.5);
-  highp float fxNl = dot(v_4.xyz, v_4.xyz);
-  highp vec3 fxN0 = fxNl > 0.0 ? v_4.xyz * inversesqrt(fxNl) : vec3(0.0, 0.0, 1.0);
-  mediump float fxAlpha = 1.0;
-  mediump vec4 fxCmd = vec4(0.0);
-  mediump vec4 fxMask = vec4(0.0);
-  mediump vec3 fxNmv = vec3(0.0, 0.0, 1.0);
-  highp vec3 fxN = vec3(0.0, 0.0, 1.0);
-  vec4 t;
-  if (fxAtlas) {
-    t = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.0)), fxDx * 0.5, fxDy * 0.5);
-    fxAlpha = t.a;
-    fxNmv = textureGrad(tex, fxQuadUV(fxUv, vec2(0.5, 0.0)), fxDx * 0.5, fxDy * 0.5).rgb * 2.0 - 1.0;
-    fxCmd = fxCommandTexel(fxUv);
-    fxMask = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.5)), fxDx * 0.5, fxDy * 0.5);
-    fxN = fxApplyNormalMap(fxN0, fxDp1, fxDp2, fxDx, fxDy, fxNmv);
-  } else {
-    t = textureGrad(tex, fxUv, fxDx, fxDy);
-  }
-)FXGLSL";
-static const char kFxPost[] = R"FXGLSL(
-  if (fxAtlas && FX_ON_CUTOUT > 0.5 && fxAlpha < FX_ATLAS_CUTOFF) DISCARD;
-  if (fxAtlas) {
-    mediump vec3 fxCol = clamp(v.rgb, 0.0, 1.0) * FX_BASE_GAIN;
-    int fxIdx = int(floor(fxCmd.r * 10.0 + 0.02)) - 1;
-    if (fxIdx >= 0) {
-      fxIdx = min(fxIdx, 3);
-      highp vec2 fxOrigin = vec2(0.5 + 0.25 * float(fxIdx & 1), 0.5 + 0.25 * float(fxIdx >> 1));
-      highp vec2 fxSu = clamp(fxSphereUV(normalize(v_3.xyz), fxN), 0.02, 0.98);
-      mediump vec3 fxSm = textureLod(tex, fxOrigin + fxSu * 0.25, 0.0).rgb;
-      mediump float fxCav = mix(1.0, FX_CAVITY_DARK, smoothstep(0.15, 0.65, length(fxNmv.xy)));
-      mediump vec3 fxSc = clamp((fxSm - 0.5) * FX_MATCAP_CONTRAST + 0.5, 0.0, 1.5);
-      mediump vec3 fxShade = mix(vec3(1.0), fxSc * FX_MATCAP_EXPOSURE, FX_MATCAP_MIX);
-      fxCol = fxCol * fxShade * fxCav;
-      mediump float fxLum = dot(fxSm, vec3(0.299, 0.587, 0.114));
-      mediump float fxFres = pow(1.0 - clamp(dot(fxN, -normalize(v_3.xyz)), 0.0, 1.0), 3.0);
-      fxCol += FX_SPEC_GAIN * pow(fxLum, 2.5) + fxFres * 0.15 * fxSm;
-    }
-    mediump float fxGdom = fxMask.g - max(fxMask.r, fxMask.b);
-    mediump float fxGm = smoothstep(FX_GREEN_LO, max(FX_GREEN_HI, FX_GREEN_LO + 0.001), fxGdom);
-    highp float fxTime = u_time * FX_EMIS_SPEED;
-    mediump float fxPulse = 0.5 + 0.5 * sin(fxTime * FX_PULSE_SPEED);
-    mediump float fxFlow = 0.5 + 0.5 * sin(fxTime * FX_FLOW_SPEED - (fxUv.x + fxUv.y) * FX_FLOW_FREQ);
-    mediump float fxEnergy = FX_ENERGY_MIN + (1.0 - FX_ENERGY_MIN) * mix(fxPulse, fxFlow, FX_FLOW_MIX);
-    mediump float fxShift = smoothstep(FX_SHIFT_START, max(FX_SHIFT_END, FX_SHIFT_START + 0.01), fxPulse) * FX_EMIS_SHIFT;
-    mediump vec3 fxGcol = mix(FX_EMIS_COLOR1, FX_EMIS_COLOR2, fxShift);
-    fxCol = mix(fxCol, fxCol * FX_GOLD_BASE_DARK, fxGm);
-    fxCol += fxGcol * fxEnergy * fxGm * FX_GOLD_GAIN * (0.5 + 0.5 * fxMask.g);
-    v.rgb = fxSoftClip(fxCol);
-  } else if (fxRim) {
-    // Rim (dari fs007, bagian flag 1). Normal rim = v_1 (worldnormal, sama dengan lighting PSP).
-    highp float fxRl = dot(v_1.xyz, v_1.xyz);
-    highp vec3 fxNr = fxRl > 0.0 ? v_1.xyz * inversesqrt(fxRl) : vec3(0.0, 0.0, 1.0);
-    highp vec3 fxSn = cross(fxDp1, fxDp2);
-    highp float fxSl = dot(fxSn, fxSn);
-    highp vec3 fxRn = fxNr;
-    if (fxSl > 0.0) fxRn = normalize(mix(fxNr, fxSn * inversesqrt(fxSl), FX_RIM_SCREEN));
-    highp vec2 fxMu = fxRn.xy * 0.45 + 0.5;
-    mediump float fxMp = pow(max(fxMu.y, 0.0), 1.5) * 0.4 + 0.5 * sin(fxMu.x * 6.28) * 0.08;
-    mediump vec3 fxMc = vec3(fxMp * 0.85, fxMp * 0.95, fxMp * 1.15);
-    mediump vec3 fxRc = (clamp(v.rgb, 0.0, 1.0) - 0.5) * FX_RIM_CONTRAST + 0.5;
-    fxRc.r *= FX_RIM_TINT_R;
-    fxRc.g *= FX_RIM_TINT_G;
-    mediump float fxRf = pow(1.0 - abs(dot(normalize(-v_3.xyz), fxNr)), FX_RIM_POWER) * FX_RIM_GAIN;
-    v.rgb = clamp(fxRc + fxMc * FX_RIM_MATCAP + FX_RIM_COLOR * fxRf, 0.0, 1.0);
-  }
-)FXGLSL";
+// Jumlah slot uniform u_fx0..u_fx15 (vec4). HARUS sama dengan FX_VEC_COUNT di ShaderManagerGLES.h.
+static constexpr int kFxVecCount = 16;
+
 
 
 
@@ -343,10 +175,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	const bool blueToAlpha = replaceBlend == ReplaceBlendType::REPLACE_BLEND_BLUE_TO_ALPHA;
 
 	bool isModeClear = id.Bit(FS_BIT_CLEARMODE);
-	// Efek model/dunia hanya untuk OpenGL ES 3.x, tekstur 2D biasa, texfunc modulate, tanpa depal.
-	const bool fxEnableHelpers = ShaderLanguageIsOpenGL(compat.shaderLanguage) && compat.glslES30 && doTexture && !isModeClear &&
-		!texture3D && !arrayTexture && texFunc == GE_TEXFUNC_MODULATE && shaderDepalMode == ShaderDepalMode::OFF;
-
 	const char *shading = "";
 	if (compat.glslES30 || compat.shaderLanguage == ShaderLanguage::GLSL_VULKAN) {
 		shading = doFlatShading ? "flat" : "";
@@ -619,27 +447,16 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
 		WRITE(p, "uniform highp float u_time;\n");
+		// Jarak near/far (view-space), nilainya dari kontrol bernama NEAR / FAR di glsl/fx_ui.txt.
+		WRITE(p, "uniform highp float u_near;\n");
+		WRITE(p, "uniform highp float u_far;\n");
 
 		if (compat.glslES30) {
-			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
-			//  - flag 1 (MODEL): pakai v_1.xyz dari VS, dinormalisasi ulang karena hasil interpolasi
-			//    tidak lagi panjang 1.
-			//  - flag 0/2 (DUNIA dll, tanpa normal vertex): normal permukaan dari turunan posisi
-			//    view-space (v_3). Arah dibalik kalau membelakangi kamera (kamera di titik asal).
-			// Turunan dihitung sebelum percabangan supaya valid (uniform control flow).
-			WRITE(p, "highp vec3 getFxNormal() {\n");
-			WRITE(p, "  highp vec3 nV = cross(dFdx(v_3.xyz), dFdy(v_3.xyz));\n");
-			WRITE(p, "  if (flag == 1) {\n");
-			WRITE(p, "    highp float l1 = dot(v_1.xyz, v_1.xyz);\n");
-			WRITE(p, "    return l1 > 0.0 ? v_1.xyz * inversesqrt(l1) : vec3(0.0, 0.0, 1.0);\n");
-			WRITE(p, "  }\n");
-			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
-			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
-			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
-			WRITE(p, "}\n");
-		}
-		if (fxEnableHelpers) {
-			p.C(kFxHelpers);
+			// Slot parameter untuk shader replace (fs_*.glsl). Diisi dari kontrol di glsl/fx_ui.txt,
+			// diatur dari Settings > Graphics. Dipakai bebas di shader, mis. u_fx0.x.
+			for (int i = 0; i < kFxVecCount; i++) {
+				WRITE(p, "uniform highp vec4 u_fx%d;\n", i);
+			}
 		}
 
 		if (!enableFragmentTestCache) {
@@ -820,12 +637,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				doTextureProjection = false;
 			}
 
-			// Jalur efek: menggantikan pembacaan tekstur biasa (aslinya dipakai untuk draw selain flag 1/2).
-			const bool fxUse = fxEnableHelpers && !doTextureProjection;
-			if (fxUse) {
-				WRITE(p, "  highp vec2 fxUv = %s.xy;\n", texcoord);
-				p.C(kFxSample);
-			} else switch (shaderDepalMode) {
+			switch (shaderDepalMode) {
 			case ShaderDepalMode::OFF:
 				if (compat.shaderLanguage == HLSL_D3D11) {
 					if (texture3D) {
@@ -1086,10 +898,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				WRITE(p, "  v.rgb = clamp(v.rgb * u_texNoAlphaMul.y, 0.0, 1.0);\n");
 			} else {
 				WRITE(p, "  v.rgb *= u_texNoAlphaMul.y;\n");
-			}
-			if (fxUse) {
-				p.C(kFxPost);
-				*fragmentShaderFlags |= FragmentShaderFlags::USES_DISCARD;  // efek atlas bisa membuang piksel transparan
 			}
 		} else {
 			// No texture mapping

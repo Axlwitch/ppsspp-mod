@@ -434,6 +434,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		*uniformMask |= DIRTY_FOGCOEF;
 		// Waktu (detik) untuk efek animasi. Diupdate tiap frame dari ShaderManagerGLES (bukan lewat uniformMask).
 		WRITE(p, "uniform highp float u_time;\n");
+		if (compat.glslES30) {
+			// Slot parameter efek untuk shader replace (vs_*.glsl), dari glsl/fx_ui.txt.
+			// Jumlah HARUS sama dengan FX_VEC_COUNT di ShaderManagerGLES.h.
+			for (int i = 0; i < 16; i++) {
+				WRITE(p, "uniform highp vec4 u_fx%d;\n", i);
+			}
+		}
 
 		WRITE(p, "%s%s lowp vec4 v_color0;\n", shading, compat.varying_vs);
 		if (lmode) {
@@ -550,7 +557,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			//  - presisi highp (worldnormal mediump -> di Mali/Adreno bisa dihitung fp16)
 			//  - pakai normal matrix yang benar (cofactor dari u_world), jadi tetap akurat
 			//    walau world matrix punya non-uniform scale / mirror
-			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (getFxNormal).
+			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (lewat dFdx/dFdy v_3).
 			WRITE(p, "  highp vec3 fxRawN = %s;\n", hasNormal ? (flipNormal ? "-normal" : "normal") : (flipNormal ? "vec3(0.0, 0.0, -1.0)" : "vec3(0.0, 0.0, 1.0)"));
 			WRITE(p, "  highp mat3 fxW = mat3(u_world);\n");
 			WRITE(p, "  highp mat3 fxNM = mat3(cross(fxW[1], fxW[2]), cross(fxW[2], fxW[0]), cross(fxW[0], fxW[1]));\n");
