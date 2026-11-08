@@ -44,11 +44,98 @@
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
 
-// Jumlah slot uniform u_fx0..u_fx15 (vec4). HARUS sama dengan FX_VEC_COUNT di ShaderManagerGLES.h.
-static constexpr int kFxVecCount = 16;
+#ifdef __FRAGMENT_GLSL_FILE__
+// ---- Shader dump & replace (OpenGL only) ----
+// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/fs001.glsl, fs002.glsl, dst (nomor urut).
+// Kalau file belum ada: hasil generator ditulis ke file (dump).
+// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
+#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
+// Folder dump & replace shader di Android.
+#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
+#endif
+#ifndef GLSL_REPLACE_BUFFER_SIZE
+// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
+#define GLSL_REPLACE_BUFFER_SIZE 16384
+#endif
 
+// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/fs_index.txt
+// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
+// Jangan hapus fs_index.txt tanpa menghapus semua fs*.glsl, karena nomornya akan berubah.
+static int FsGlslIndex(uint64_t hash, const Path &dir) {
+	static std::mutex mtx;
+	static bool loaded = false;
+	static std::map<uint64_t, int> indexOf;
+	static int nextIndex = 1;
+	std::lock_guard<std::mutex> lock(mtx);
+	const std::string mapFile = (dir / std::string("fs_index.txt")).ToString();
+	if (!loaded) {
+		loaded = true;
+		std::ifstream in(mapFile);
+		unsigned long long h = 0;
+		int idx = 0;
+		while (in >> std::hex >> h >> std::dec >> idx) {
+			indexOf[(uint64_t)h] = idx;
+			if (idx >= nextIndex) {
+				nextIndex = idx + 1;
+			}
+		}
+	}
+	auto it = indexOf.find(hash);
+	if (it != indexOf.end()) {
+		return it->second;
+	}
+	const int idx = nextIndex++;
+	indexOf[hash] = idx;
+	File::CreateDir(dir);
+	std::ofstream out(mapFile, std::ios::app);
+	if (out.is_open()) {
+		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
+	}
+	return idx;
+}
 
+static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
+	// FNV-1a 64-bit atas seluruh byte ID shader.
+	uint64_t hash = 1469598103934665603ULL;
+	const uint8_t *bytes = (const uint8_t *)idData;
+	for (size_t i = 0; i < idSize; i++) {
+		hash ^= bytes[i];
+		hash *= 1099511628211ULL;
+	}
+	char name[64];
 
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
+	// Nama: fs001.glsl, fs002.glsl, ... (nomor urut tetap dari fs_index.txt).
+	snprintf(name, sizeof(name), "fs%03d.glsl", FsGlslIndex(hash, dir));
+	std::string file = (dir / std::string(name)).ToString();
+
+	std::ifstream in(file, std::ios::binary);
+	if (in.is_open()) {
+		in.seekg(0, std::ios::end);
+		std::streamoff size = in.tellg();
+		in.seekg(0, std::ios::beg);
+		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
+			std::string code((size_t)size, '\0');
+			in.read(&code[0], size);
+			if (in.gcount() == size) {
+				memcpy(buffer, code.data(), (size_t)size);
+				buffer[size] = '\0';
+			}
+		}
+		return;
+	}
+
+	File::CreateDir(dir);
+	std::ofstream out(file, std::ios::binary);
+	if (out.is_open()) {
+		out.write(buffer, (std::streamsize)strlen(buffer));
+	}
+}
+#endif
 
 static const SamplerDef samplersMono[3] = {
 	{ 0, "tex" },
@@ -175,6 +262,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	const bool blueToAlpha = replaceBlend == ReplaceBlendType::REPLACE_BLEND_BLUE_TO_ALPHA;
 
 	bool isModeClear = id.Bit(FS_BIT_CLEARMODE);
+
 	const char *shading = "";
 	if (compat.glslES30 || compat.shaderLanguage == ShaderLanguage::GLSL_VULKAN) {
 		shading = doFlatShading ? "flat" : "";
@@ -447,16 +535,34 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
 		WRITE(p, "uniform highp float u_time;\n");
-		// Jarak near/far (view-space), nilainya dari kontrol bernama NEAR / FAR di glsl/fx_ui.txt.
+		// Batas jarak (view-space) untuk efek blur jauh, dari glsl/fx_params.txt (lihat ShaderManagerGLES).
 		WRITE(p, "uniform highp float u_near;\n");
 		WRITE(p, "uniform highp float u_far;\n");
 
 		if (compat.glslES30) {
-			// Slot parameter untuk shader replace (fs_*.glsl). Diisi dari kontrol di glsl/fx_ui.txt,
-			// diatur dari Settings > Graphics. Dipakai bebas di shader, mis. u_fx0.x.
-			for (int i = 0; i < kFxVecCount; i++) {
-				WRITE(p, "uniform highp vec4 u_fx%d;\n", i);
-			}
+			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
+			//  - flag 1 (MODEL): pakai v_1.xyz dari VS, dinormalisasi ulang karena hasil interpolasi
+			//    tidak lagi panjang 1.
+			//  - flag 0/2 (DUNIA dll, tanpa normal vertex): normal permukaan dari turunan posisi
+			//    view-space (v_3). Arah dibalik kalau membelakangi kamera (kamera di titik asal).
+			// Turunan dihitung sebelum percabangan supaya valid (uniform control flow).
+			WRITE(p, "highp vec3 getFxNormal() {\n");
+			WRITE(p, "  highp vec3 nV = cross(dFdx(v_3.xyz), dFdy(v_3.xyz));\n");
+			WRITE(p, "  if (flag == 1) {\n");
+			WRITE(p, "    highp float l1 = dot(v_1.xyz, v_1.xyz);\n");
+			WRITE(p, "    return l1 > 0.0 ? v_1.xyz * inversesqrt(l1) : vec3(0.0, 0.0, 1.0);\n");
+			WRITE(p, "  }\n");
+			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
+			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
+			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
+			WRITE(p, "}\n");
+
+			// Kekuatan blur jarak jauh, 0..1. Hanya untuk dunia (flag 2); model, HUD, partikel = 0.
+			// 0 saat jarak <= u_near, 1 saat jarak >= u_far.
+			WRITE(p, "highp float getFarBlur() {\n");
+			WRITE(p, "  if (flag != 2) return 0.0;\n");
+			WRITE(p, "  return smoothstep(u_near, u_far, abs(v_3.z));\n");
+			WRITE(p, "}\n");
 		}
 
 		if (!enableFragmentTestCache) {
@@ -1268,6 +1374,11 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 	WRITE(p, "}\n");
 
+#ifdef __FRAGMENT_GLSL_FILE__
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+		FsGlslReplace(&id, sizeof(id), buffer);
+	}
+#endif
 
 	return true;
 }

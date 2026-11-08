@@ -40,6 +40,98 @@
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
 
+#ifdef __VERTEXT_GLSL_FILE__
+// ---- Shader dump & replace (OpenGL only) ----
+// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/vs001.glsl, vs002.glsl, dst (nomor urut).
+// Kalau file belum ada: hasil generator ditulis ke file (dump).
+// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
+#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
+// Folder dump & replace shader di Android.
+#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
+#endif
+#ifndef GLSL_REPLACE_BUFFER_SIZE
+// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
+#define GLSL_REPLACE_BUFFER_SIZE 16384
+#endif
+
+// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/vs_index.txt
+// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
+// Jangan hapus vs_index.txt tanpa menghapus semua vs*.glsl, karena nomornya akan berubah.
+static int VsGlslIndex(uint64_t hash, const Path &dir) {
+	static std::mutex mtx;
+	static bool loaded = false;
+	static std::map<uint64_t, int> indexOf;
+	static int nextIndex = 1;
+	std::lock_guard<std::mutex> lock(mtx);
+	const std::string mapFile = (dir / std::string("vs_index.txt")).ToString();
+	if (!loaded) {
+		loaded = true;
+		std::ifstream in(mapFile);
+		unsigned long long h = 0;
+		int idx = 0;
+		while (in >> std::hex >> h >> std::dec >> idx) {
+			indexOf[(uint64_t)h] = idx;
+			if (idx >= nextIndex) {
+				nextIndex = idx + 1;
+			}
+		}
+	}
+	auto it = indexOf.find(hash);
+	if (it != indexOf.end()) {
+		return it->second;
+	}
+	const int idx = nextIndex++;
+	indexOf[hash] = idx;
+	File::CreateDir(dir);
+	std::ofstream out(mapFile, std::ios::app);
+	if (out.is_open()) {
+		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
+	}
+	return idx;
+}
+
+static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
+	// FNV-1a 64-bit atas seluruh byte ID shader.
+	uint64_t hash = 1469598103934665603ULL;
+	const uint8_t *bytes = (const uint8_t *)idData;
+	for (size_t i = 0; i < idSize; i++) {
+		hash ^= bytes[i];
+		hash *= 1099511628211ULL;
+	}
+	char name[64];
+
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
+	// Nama: vs001.glsl, vs002.glsl, ... (nomor urut tetap dari vs_index.txt).
+	snprintf(name, sizeof(name), "vs%03d.glsl", VsGlslIndex(hash, dir));
+	std::string file = (dir / std::string(name)).ToString();
+
+	std::ifstream in(file, std::ios::binary);
+	if (in.is_open()) {
+		in.seekg(0, std::ios::end);
+		std::streamoff size = in.tellg();
+		in.seekg(0, std::ios::beg);
+		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
+			std::string code((size_t)size, '\0');
+			in.read(&code[0], size);
+			if (in.gcount() == size) {
+				memcpy(buffer, code.data(), (size_t)size);
+				buffer[size] = '\0';
+			}
+		}
+		return;
+	}
+
+	File::CreateDir(dir);
+	std::ofstream out(file, std::ios::binary);
+	if (out.is_open()) {
+		out.write(buffer, (std::streamsize)strlen(buffer));
+	}
+}
+#endif
 
 // Depth range and viewport
 //
@@ -434,13 +526,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		*uniformMask |= DIRTY_FOGCOEF;
 		// Waktu (detik) untuk efek animasi. Diupdate tiap frame dari ShaderManagerGLES (bukan lewat uniformMask).
 		WRITE(p, "uniform highp float u_time;\n");
-		if (compat.glslES30) {
-			// Slot parameter efek untuk shader replace (vs_*.glsl), dari glsl/fx_ui.txt.
-			// Jumlah HARUS sama dengan FX_VEC_COUNT di ShaderManagerGLES.h.
-			for (int i = 0; i < 16; i++) {
-				WRITE(p, "uniform highp vec4 u_fx%d;\n", i);
-			}
-		}
 
 		WRITE(p, "%s%s lowp vec4 v_color0;\n", shading, compat.varying_vs);
 		if (lmode) {
@@ -557,21 +642,21 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			//  - presisi highp (worldnormal mediump -> di Mali/Adreno bisa dihitung fp16)
 			//  - pakai normal matrix yang benar (cofactor dari u_world), jadi tetap akurat
 			//    walau world matrix punya non-uniform scale / mirror
-			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (lewat dFdx/dFdy v_3).
+			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (getFxNormal).
 			WRITE(p, "  highp vec3 fxRawN = %s;\n", hasNormal ? (flipNormal ? "-normal" : "normal") : (flipNormal ? "vec3(0.0, 0.0, -1.0)" : "vec3(0.0, 0.0, 1.0)"));
 			WRITE(p, "  highp mat3 fxW = mat3(u_world);\n");
 			WRITE(p, "  highp mat3 fxNM = mat3(cross(fxW[1], fxW[2]), cross(fxW[2], fxW[0]), cross(fxW[0], fxW[1]));\n");
 			WRITE(p, "  highp vec3 fxNormal = normalizeOr001(fxNM * fxRawN);\n");
 			WRITE(p, "  if (dot(fxW[0], fxNM[0]) < 0.0) fxNormal = -fxNormal;\n");  // koreksi tanda kalau matrix ter-mirror
-			// v_1 = normal VIEW-SPACE dari worldnormal (sama dengan lighting PSP), dipakai efek rim (w = 0)
+			// v_1 = normal VIEW-SPACE (xyz, w = 0): dunia -> view dengan u_view, jadi efek ikut kamera
 			//       (normal dunia tidak berubah saat kamera bergerak, normal view-space berubah).
 			// v_2 = posisi dunia
 			// v_3 = posisi view-space (untuk normal turunan di FS dan arah ke kamera)
-			// v_4 = normal VIEW-SPACE dari fxNormal (highp, akurat), dipakai efek atlas
-			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(worldnormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
+			// v_4 = bebas (0)
+			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_2 = vec4(worldpos, 1.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_3 = vec4(viewPos.xyz, 1.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_4 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
 			if (useFlagVarying) {
 				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
 			}
@@ -1049,6 +1134,11 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  return Out;\n");
 	}
 	WRITE(p, "}\n");
+#ifdef __VERTEXT_GLSL_FILE__
+	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
+		VsGlslReplace(&id, sizeof(id), buffer);
+	}
+#endif
 
 	return true;
 }
