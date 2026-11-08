@@ -556,15 +556,15 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  highp mat3 fxNM = mat3(cross(fxW[1], fxW[2]), cross(fxW[2], fxW[0]), cross(fxW[0], fxW[1]));\n");
 			WRITE(p, "  highp vec3 fxNormal = normalizeOr001(fxNM * fxRawN);\n");
 			WRITE(p, "  if (dot(fxW[0], fxNM[0]) < 0.0) fxNormal = -fxNormal;\n");  // koreksi tanda kalau matrix ter-mirror
-			// v_1 = normal VIEW-SPACE (xyz, w = 0): dunia -> view dengan u_view, jadi efek ikut kamera
+			// v_1 = normal VIEW-SPACE dari worldnormal (sama dengan lighting PSP), dipakai efek rim (w = 0)
 			//       (normal dunia tidak berubah saat kamera bergerak, normal view-space berubah).
 			// v_2 = posisi dunia
 			// v_3 = posisi view-space (untuk normal turunan di FS dan arah ke kamera)
-			// v_4 = bebas (0)
-			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
+			// v_4 = normal VIEW-SPACE dari fxNormal (highp, akurat), dipakai efek atlas
+			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(worldnormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_2 = vec4(worldpos, 1.0);\n", compat.vsOutPrefix);
 			WRITE(p, "  %sv_3 = vec4(viewPos.xyz, 1.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
+			WRITE(p, "  %sv_4 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
 			if (useFlagVarying) {
 				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
 			}

@@ -71,38 +71,37 @@ uniform highp vec4 u_fx12;
 #define FX_SPEC_GAIN        u_fx1.w
 #define FX_BASE_GAIN        u_fx2.x
 #define FX_CAVITY_DARK      u_fx2.y
-#define FX_GOLD_GAIN        u_fx2.z
-#define FX_GOLD_BASE_DARK   u_fx2.w
-#define FX_FLOW_FREQ        u_fx3.x
-#define FX_FLOW_MIX         u_fx3.y
-#define FX_GREEN_LO         u_fx3.z
-#define FX_GREEN_HI         u_fx3.w
-#define FX_BLUR_START       u_fx4.z
-#define FX_BLUR_RADIUS      u_fx4.w
-#define FX_EMIS_COLOR1      u_fx5.xyz
-#define FX_EMIS_SPEED       u_fx5.w
-#define FX_EMIS_COLOR2      u_fx6.xyz
+#define FX_ATLAS_CUTOFF     u_fx2.z
+#define FX_GREEN_LO         u_fx2.w
+#define FX_GREEN_HI         u_fx3.x
+#define FX_GOLD_GAIN        u_fx3.y
+#define FX_GOLD_BASE_DARK   u_fx3.z
+#define FX_EMIS_COLOR1      vec3(u_fx3.w, u_fx4.x, u_fx4.y)
+#define FX_EMIS_COLOR2      vec3(u_fx4.z, u_fx4.w, u_fx5.x)
+#define FX_EMIS_SPEED       u_fx5.y
+#define FX_PULSE_SPEED      u_fx5.z
+#define FX_FLOW_SPEED       u_fx5.w
+#define FX_FLOW_FREQ        u_fx6.x
+#define FX_FLOW_MIX         u_fx6.y
+#define FX_ENERGY_MIN       u_fx6.z
 #define FX_EMIS_SHIFT       u_fx6.w
-#define FX_ON_ATLAS         u_fx7.x
-#define FX_ON_EMIS          u_fx7.y
-#define FX_ON_BLUR          u_fx7.z
-#define FX_BLUR_HQ          u_fx7.w
-#define FX_DK_COLOR1        u_fx8.xyz
-#define FX_DK_SPEED         u_fx8.w
-#define FX_DK_COLOR2        u_fx9.xyz
-#define FX_DK_SHIFT         u_fx9.w
-#define FX_DK_LO            u_fx10.x
-#define FX_DK_HI            u_fx10.y
-#define FX_DK_GAIN          u_fx10.z
-#define FX_DK_CONTRAST      u_fx10.w
-#define FX_ON_RIM           u_fx11.x
-#define FX_RM_CONTRAST      u_fx11.y
-#define FX_RM_R             u_fx11.z
-#define FX_RM_G             u_fx11.w
-#define FX_RM_MATCAP        u_fx12.x
-#define FX_RM_POWER         u_fx12.y
-#define FX_RM_GAIN          u_fx12.z
-#define FX_RM_SCREEN        u_fx12.w
+#define FX_SHIFT_START      u_fx7.x
+#define FX_SHIFT_END        u_fx7.y
+#define FX_RIM_CONTRAST     u_fx7.z
+#define FX_RIM_TINT_R       u_fx7.w
+#define FX_RIM_TINT_G       u_fx8.x
+#define FX_RIM_MATCAP       u_fx8.y
+#define FX_RIM_SCREEN       u_fx8.z
+#define FX_RIM_POWER        u_fx8.w
+#define FX_RIM_GAIN         u_fx9.x
+#define FX_RIM_COLOR        vec3(u_fx9.y, u_fx9.z, u_fx9.w)
+#define FX_BLUR_START       u_fx10.z
+#define FX_BLUR_RADIUS      u_fx10.w
+#define FX_ON_ATLAS         u_fx11.x
+#define FX_ON_RIM           u_fx11.y
+#define FX_ON_BLUR          u_fx11.z
+#define FX_BLUR_HQ          u_fx11.w
+#define FX_ON_CUTOUT        u_fx12.x
 #define FX_MARK_SIZE_MIN    16
 bool fxIsBlue(mediump vec3 c) { return c.r < 0.1 && c.g < 0.1 && c.b > 0.8; }
 bool fxHasMarker() {
@@ -150,9 +149,9 @@ static const char kFxSample[] = R"FXGLSL(
   highp vec3 fxDp2 = dFdy(v_3.xyz);
   bool fxAtlas = (flag == 1) && (FX_ON_ATLAS > 0.5) && fxHasMarker();
   bool fxRim = (flag == 1) && !fxAtlas && (FX_ON_RIM > 0.5);
-  bool fxDark = (flag == 1) && !fxAtlas && !fxRim && (FX_ON_EMIS > 0.5);
-  highp float fxNl = dot(v_1.xyz, v_1.xyz);
-  highp vec3 fxN0 = fxNl > 0.0 ? v_1.xyz * inversesqrt(fxNl) : vec3(0.0, 0.0, 1.0);
+  highp float fxNl = dot(v_4.xyz, v_4.xyz);
+  highp vec3 fxN0 = fxNl > 0.0 ? v_4.xyz * inversesqrt(fxNl) : vec3(0.0, 0.0, 1.0);
+  mediump float fxAlpha = 1.0;
   mediump vec4 fxCmd = vec4(0.0);
   mediump vec4 fxMask = vec4(0.0);
   mediump vec3 fxNmv = vec3(0.0, 0.0, 1.0);
@@ -160,6 +159,7 @@ static const char kFxSample[] = R"FXGLSL(
   vec4 t;
   if (fxAtlas) {
     t = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.0)), fxDx * 0.5, fxDy * 0.5);
+    fxAlpha = t.a;
     fxNmv = textureGrad(tex, fxQuadUV(fxUv, vec2(0.5, 0.0)), fxDx * 0.5, fxDy * 0.5).rgb * 2.0 - 1.0;
     fxCmd = fxCommandTexel(fxUv);
     fxMask = textureGrad(tex, fxQuadUV(fxUv, vec2(0.0, 0.5)), fxDx * 0.5, fxDy * 0.5);
@@ -184,7 +184,6 @@ static const char kFxSample[] = R"FXGLSL(
           + 0.2 * textureGrad(tex, fxUv + fxU2, fxGx, fxGy)
           + 0.2 * textureGrad(tex, fxUv - fxU2, fxGx, fxGy);
       } else {
-        // Mode ringan: 3 tap (tengah + sepasang tap berlawanan arah, arah diputar per piksel oleh noise).
         highp vec2 fxC = vec2(cos(fxA), sin(fxA)) * (fxR * 1.3);
         highp vec2 fxU1 = fxDx * fxC.x + fxDy * fxC.y;
         t = 0.4 * t
@@ -195,6 +194,7 @@ static const char kFxSample[] = R"FXGLSL(
   }
 )FXGLSL";
 static const char kFxPost[] = R"FXGLSL(
+  if (fxAtlas && FX_ON_CUTOUT > 0.5 && fxAlpha < FX_ATLAS_CUTOFF) DISCARD;
   if (fxAtlas) {
     mediump vec3 fxCol = clamp(v.rgb, 0.0, 1.0) * FX_BASE_GAIN;
     int fxIdx = int(floor(fxCmd.r * 10.0 + 0.02)) - 1;
@@ -212,42 +212,32 @@ static const char kFxPost[] = R"FXGLSL(
       fxCol += FX_SPEC_GAIN * pow(fxLum, 2.5) + fxFres * 0.15 * fxSm;
     }
     mediump float fxGdom = fxMask.g - max(fxMask.r, fxMask.b);
-    mediump float fxGm = smoothstep(FX_GREEN_LO, FX_GREEN_HI, fxGdom);
+    mediump float fxGm = smoothstep(FX_GREEN_LO, max(FX_GREEN_HI, FX_GREEN_LO + 0.001), fxGdom);
     highp float fxTime = u_time * FX_EMIS_SPEED;
-    mediump float fxPulse = 0.5 + 0.5 * sin(fxTime * 4.0);
-    mediump float fxFlow = 0.5 + 0.5 * sin(fxTime * 3.0 - (fxUv.x + fxUv.y) * FX_FLOW_FREQ);
-    mediump float fxEnergy = 0.35 + 0.65 * mix(fxPulse, fxFlow, FX_FLOW_MIX);
-    mediump float fxShift = smoothstep(0.7, 0.95, fxPulse) * FX_EMIS_SHIFT;
+    mediump float fxPulse = 0.5 + 0.5 * sin(fxTime * FX_PULSE_SPEED);
+    mediump float fxFlow = 0.5 + 0.5 * sin(fxTime * FX_FLOW_SPEED - (fxUv.x + fxUv.y) * FX_FLOW_FREQ);
+    mediump float fxEnergy = FX_ENERGY_MIN + (1.0 - FX_ENERGY_MIN) * mix(fxPulse, fxFlow, FX_FLOW_MIX);
+    mediump float fxShift = smoothstep(FX_SHIFT_START, max(FX_SHIFT_END, FX_SHIFT_START + 0.01), fxPulse) * FX_EMIS_SHIFT;
     mediump vec3 fxGcol = mix(FX_EMIS_COLOR1, FX_EMIS_COLOR2, fxShift);
     fxCol = mix(fxCol, fxCol * FX_GOLD_BASE_DARK, fxGm);
     fxCol += fxGcol * fxEnergy * fxGm * FX_GOLD_GAIN * (0.5 + 0.5 * fxMask.g);
     v.rgb = fxSoftClip(fxCol);
   } else if (fxRim) {
-    // Rim + matcap prosedural. Terpisah dari atlas dan emisif gelap (prioritas: atlas > rim > emisif gelap).
+    // Rim (dari fs007, bagian flag 1). Normal rim = v_1 (worldnormal, sama dengan lighting PSP).
+    highp float fxRl = dot(v_1.xyz, v_1.xyz);
+    highp vec3 fxNr = fxRl > 0.0 ? v_1.xyz * inversesqrt(fxRl) : vec3(0.0, 0.0, 1.0);
     highp vec3 fxSn = cross(fxDp1, fxDp2);
     highp float fxSl = dot(fxSn, fxSn);
-    highp vec3 fxRn = fxN0;
-    if (fxSl > 0.0) fxRn = normalize(mix(fxN0, fxSn * inversesqrt(fxSl), FX_RM_SCREEN));
+    highp vec3 fxRn = fxNr;
+    if (fxSl > 0.0) fxRn = normalize(mix(fxNr, fxSn * inversesqrt(fxSl), FX_RIM_SCREEN));
     highp vec2 fxMu = fxRn.xy * 0.45 + 0.5;
     mediump float fxMp = pow(max(fxMu.y, 0.0), 1.5) * 0.4 + 0.5 * sin(fxMu.x * 6.28) * 0.08;
     mediump vec3 fxMc = vec3(fxMp * 0.85, fxMp * 0.95, fxMp * 1.15);
-    mediump vec3 fxRc = (clamp(v.rgb, 0.0, 1.0) - 0.5) * FX_RM_CONTRAST + 0.5;
-    fxRc.r *= FX_RM_R;
-    fxRc.g *= FX_RM_G;
-    mediump float fxRf = pow(1.0 - abs(dot(normalize(-v_3.xyz), fxN0)), FX_RM_POWER) * FX_RM_GAIN;
-    v.rgb = clamp(fxRc + fxMc * FX_RM_MATCAP + vec3(fxRf), 0.0, 1.0);
-  } else if (fxDark) {
-    // Emisif area gelap: kontras dasar + denyut Cyan -> kilat merah, hanya di bagian tekstur paling gelap.
-    mediump vec3 fxB = clamp(v.rgb, 0.0, 1.0);
-    fxB = clamp((fxB - 0.5) * FX_DK_CONTRAST + 0.5, 0.0, 1.0) * vec3(1.04, 1.03, 1.0);
-    mediump float fxLm = dot(t.rgb, vec3(0.2126, 0.7152, 0.0722));
-    mediump float fxDm = 1.0 - smoothstep(FX_DK_LO, FX_DK_HI, fxLm);
-    highp float fxTa = u_time * FX_DK_SPEED * 0.6;
-    mediump float fxPl = pow(abs(sin(fxTa)), 1.5);
-    mediump float fxSh = smoothstep(0.7, 0.95, fxPl);
-    mediump vec3 fxEc = mix(FX_DK_COLOR1, FX_DK_COLOR2, fxSh * FX_DK_SHIFT);
-    fxB += fxEc * (0.05 + 0.95 * fxPl) * fxDm * FX_DK_GAIN;
-    v.rgb = pow(clamp(fxB, 0.0, 1.0), vec3(1.0 / 0.9));
+    mediump vec3 fxRc = (clamp(v.rgb, 0.0, 1.0) - 0.5) * FX_RIM_CONTRAST + 0.5;
+    fxRc.r *= FX_RIM_TINT_R;
+    fxRc.g *= FX_RIM_TINT_G;
+    mediump float fxRf = pow(1.0 - abs(dot(normalize(-v_3.xyz), fxNr)), FX_RIM_POWER) * FX_RIM_GAIN;
+    v.rgb = clamp(fxRc + fxMc * FX_RIM_MATCAP + FX_RIM_COLOR * fxRf, 0.0, 1.0);
   }
 )FXGLSL";
 
@@ -1134,6 +1124,7 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			}
 			if (fxUse) {
 				p.C(kFxPost);
+				*fragmentShaderFlags |= FragmentShaderFlags::USES_DISCARD;  // efek atlas bisa membuang piksel transparan
 			}
 		} else {
 			// No texture mapping
