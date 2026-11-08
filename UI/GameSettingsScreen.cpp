@@ -379,62 +379,71 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 
 	graphicsSettings->Add(new CheckBox(&g_Config.bReplaceTextures, dev->T("Replace textures")));
 
-	// Pengaturan efek shader. Tiap bagian: judul, saklar nyala/mati, lalu slider-nya.
-	// Slider ikut redup kalau efeknya dimatikan. Efek mati = tampilan asli game.
+	// Pengaturan efek shader. Daftar kontrol dibaca dari glsl/fx_ui.txt (diisi pengguna);
+	// aplikasi hanya menyediakan sistemnya. Nilai disimpan ke glsl/fx_tune.txt.
 	{
-		auto addFxToggle = [&](int k, const char *label) -> CheckBox * {
-			CheckBox *cb = graphicsSettings->Add(new CheckBox(&g_fxTune.on[k], label));
-			cb->OnClick.Add([k](UI::EventParams &e) {
-				g_fxTune.v[FxToggleIndex(k)] = g_fxTune.on[k] ? 1.0f : 0.0f;
-				g_fxTune.version++;
-				FxTuneSave();
+		FxTuneLoadNow();
+		const std::vector<FxControl> fxControls = FxTuneGetControls();
+
+		graphicsSettings->Add(new ItemHeader("Efek Shader (daftar dari glsl/fx_ui.txt)"));
+
+		bool anyControl = false;
+		for (const FxControl &c : fxControls)
+			anyControl = anyControl || c.slot >= 0;
+		if (!anyControl) {
+			graphicsSettings->Add(new UI::TextView("Belum ada kontrol. Isi glsl/fx_ui.txt (contoh format ada di dalam file), lalu tekan Muat ulang.", new UI::LinearLayoutParams(UI::WRAP_CONTENT, UI::WRAP_CONTENT, UI::Margins(8, 8, 8, 8))));
+		}
+
+		auto addFxReset = [&](int first, int end) {
+			Choice *reset = graphicsSettings->Add(new Choice("Kembalikan ke bawaan (bagian ini)"));
+			reset->OnClick.Add([this, first, end](UI::EventParams &e) {
+				FxTuneResetSlots(first, end);
+				RecreateViews();
 			});
-			return cb;
 		};
-		auto addFxSliders = [&](int from, int to, std::function<bool()> enabled) {
-			for (int i = from; i < to; i++) {
-				PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[i], kFxMin[i], kFxMax[i], kFxDef[i], kFxLabels[i], (kFxMax[i] - kFxMin[i]) / 100.0f, screenManager(), ""));
-				fx->SetEnabledFunc(enabled);
+
+		int secFirst = -1, secEnd = 0;
+		for (const FxControl &c : fxControls) {
+			if (c.type == FxCtlType::Header) {
+				if (secFirst >= 0)
+					addFxReset(secFirst, secEnd);
+				secFirst = -1;
+				graphicsSettings->Add(new ItemHeader(c.label));
+			} else if (c.type == FxCtlType::Toggle) {
+				if (secFirst < 0) secFirst = c.slot;
+				secEnd = c.slot + 1;
+				const int slot = c.slot;
+				CheckBox *cb = graphicsSettings->Add(new CheckBox(&g_fxTune.on[slot], c.label));
+				cb->OnClick.Add([slot](UI::EventParams &e) {
+					g_fxTune.v[slot] = g_fxTune.on[slot] ? 1.0f : 0.0f;
+					g_fxTune.version++;
+					FxTuneSave();
+				});
+			} else {
+				if (secFirst < 0) secFirst = c.slot;
+				secEnd = c.slot + 1;
+				PopupSliderChoiceFloat *fx = graphicsSettings->Add(new PopupSliderChoiceFloat(&g_fxTune.v[c.slot], c.minV, c.maxV, c.defV, c.label, (c.maxV - c.minV) / 100.0f, screenManager(), ""));
 				fx->OnChange.Add([](UI::EventParams &e) {
 					g_fxTune.version++;
 					FxTuneSave();
 				});
 			}
-		};
-		auto addFxReset = [&](int from, int to) {
-			Choice *reset = graphicsSettings->Add(new Choice("Kembalikan ke bawaan (bagian ini)"));
-			reset->OnClick.Add([this, from, to](UI::EventParams &e) {
-				FxTuneResetRange(from, to);
-				RecreateViews();
-			});
-		};
-		auto atlasOn = []() { return g_fxTune.on[0]; };
+		}
+		if (secFirst >= 0)
+			addFxReset(secFirst, secEnd);
 
-		graphicsSettings->Add(new ItemHeader("1. Efek Atlas (butuh tekstur atlas)"));
-		addFxToggle(0, "Nyalakan efek atlas");
-		addFxToggle(4, "Buang bagian transparan (jaga area bolong tetap bolong)")->SetEnabledFunc(atlasOn);
-		addFxSliders(0, 10, atlasOn);
-		addFxSliders(10, 11, []() { return g_fxTune.on[0] && g_fxTune.on[4]; });
-		addFxReset(0, 11);
-
-		graphicsSettings->Add(new ItemHeader("1a. Atlas: area yang menyala (emisif)"));
-		addFxSliders(11, 15, atlasOn);
-		graphicsSettings->Add(new ItemHeader("1b. Atlas: warna nyala"));
-		addFxSliders(15, 21, atlasOn);
-		graphicsSettings->Add(new ItemHeader("1c. Atlas: gerak dan pergantian warna"));
-		addFxSliders(21, 30, atlasOn);
-		addFxReset(11, 30);
-
-		graphicsSettings->Add(new ItemHeader("2. Efek Rim (model tanpa atlas)"));
-		addFxToggle(1, "Nyalakan efek rim");
-		addFxSliders(30, 40, []() { return g_fxTune.on[1]; });
-		addFxReset(30, 40);
-
-		Choice *fxReset = graphicsSettings->Add(new Choice("Kembalikan SEMUA efek ke bawaan"));
-		fxReset->OnClick.Add([this](UI::EventParams &e) {
-			FxTuneReset();
+		Choice *fxReload = graphicsSettings->Add(new Choice("Muat ulang fx_ui.txt"));
+		fxReload->OnClick.Add([this](UI::EventParams &e) {
+			FxTuneLoadNow();
 			RecreateViews();
 		});
+		if (anyControl) {
+			Choice *fxReset = graphicsSettings->Add(new Choice("Kembalikan SEMUA efek ke bawaan"));
+			fxReset->OnClick.Add([this](UI::EventParams &e) {
+				FxTuneResetAll();
+				RecreateViews();
+			});
+		}
 	}
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Display")));
