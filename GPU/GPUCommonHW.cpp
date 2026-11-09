@@ -491,6 +491,7 @@ void GPUCommonHW::UpdateCmdInfo() {
 
 void GPUCommonHW::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
 	framebufferManager_->SetDisplayFramebuffer(framebuf, stride, format);
+	framebufferManager_->ResetDepthEffectFrame();
 	NotifyDisplay(framebuf, stride, format);
 }
 
@@ -931,6 +932,13 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	}
 
 	CheckDepthUsage(vfb);
+
+	// Depth-aware effect (DOF): run it when the HUD starts, so the HUD is drawn on top, unblurred.
+	if (framebufferManager_->ShouldApplyDepthEffect(vfb, gstate.isModeThrough(), gstate.isModeClear())) {
+		drawEngineCommon_->FlushQueuedDepth();
+		drawEngineCommon_->Flush();
+		framebufferManager_->ApplyDepthEffect(vfb);
+	}
 
 	const void *verts = Memory::GetPointerUnchecked(gstate_c.vertexAddr);
 	const void *inds = nullptr;
