@@ -103,6 +103,13 @@ public:
 
 	bool UpdatePostShader(const DisplayLayoutConfig &config);
 
+	// Depth-aware post shader (UseDepth = true in the .ini). Runs in-game, not at present time.
+	bool HasDepthShader() const {
+		return depthPipeline_ != nullptr;
+	}
+	// src must have color + depth (not the same framebuffer as dst). dst keeps its depth.
+	void RunDepthShader(Draw::Framebuffer *src, Draw::Framebuffer *dst);
+
 	void BeginFrame(const DisplayLayoutConfig &config) {
 		if (restorePostShader_) {
 			UpdatePostShader(config);
@@ -166,6 +173,9 @@ protected:
 	std::vector<ShaderInfo> postShaderInfo_;
 	std::vector<Draw::Framebuffer *> previousFramebuffers_;
 	
+	Draw::Pipeline *depthPipeline_ = nullptr;
+	ShaderInfo *depthShaderInfo_ = nullptr;
+
 	Draw::Pipeline *stereoPipeline_ = nullptr;
 	ShaderInfo *stereoShaderInfo_ = nullptr;
 

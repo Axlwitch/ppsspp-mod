@@ -49,6 +49,9 @@ struct ShaderInfo {
 	bool requires60fps;
 	// Takes previous frame as input (for blending effects.)
 	bool usePreviousFrame;
+	// Depth-aware shader (e.g. depth of field). Not part of the present chain: it runs once per frame
+	// right before the HUD starts drawing, with color as sampler0/sampler1 and depth as sampler2.
+	bool useDepth;
 
 	struct Setting {
 		std::string name;

@@ -2956,6 +2956,11 @@ void FramebufferManagerCommon::NotifyConfigChanged() {
 }
 
 void FramebufferManagerCommon::DestroyAllFBOs() {
+	if (dofTemp_) {
+		dofTemp_->Release();
+		dofTemp_ = nullptr;
+	}
+	ResetDepthEffectFrame();
 	DiscardFramebufferCopy();
 	currentRenderVfb_ = nullptr;
 	displayFramebuf_ = nullptr;
@@ -3755,4 +3760,52 @@ static void ApplyKillzoneFramebufferSplit(FramebufferHeuristicParams *params, in
 		gstate_c.SetCurRTOffset(0, 0);
 		*drawing_width = 480;
 	}
+}
+
+
+// Number of 3D (non-through) draws on a framebuffer before a through-mode draw is taken to be the start of the HUD.
+static constexpr int kDepthEffectMinSceneDraws = 6;
+
+bool FramebufferManagerCommon::ShouldApplyDepthEffect(VirtualFramebuffer *vfb, bool isThrough, bool isClear) {
+	if (!vfb || !vfb->fbo || dofDoneThisFrame_ || isClear || !presentation_->HasDepthShader())
+		return false;
+	if (!isThrough) {
+		if (dofVfb_ != vfb) {
+			dofVfb_ = vfb;
+			dof3DDraws_ = 0;
+		}
+		dof3DDraws_++;
+		return false;
+	}
+	return vfb == dofVfb_ && dof3DDraws_ >= kDepthEffectMinSceneDraws && vfb->width >= 256;
+}
+
+void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
+	dofDoneThisFrame_ = true;
+	if (!vfb || !vfb->fbo || GetFramebufferLayers() > 1)
+		return;
+
+	const int w = vfb->renderWidth;
+	const int h = vfb->renderHeight;
+	if (dofTemp_) {
+		int tw, th;
+		draw_->GetFramebufferDimensions(dofTemp_, &tw, &th);
+		if (tw != w || th != h) {
+			dofTemp_->Release();
+			dofTemp_ = nullptr;
+		}
+	}
+	if (!dofTemp_) {
+		dofTemp_ = draw_->CreateFramebuffer({ w, h, 1, 1, 0, true, "dof_temp" });
+		if (!dofTemp_)
+			return;
+	}
+
+	// The effect samples color and depth from a copy, since vfb->fbo is the render target.
+	draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::COLOR_BIT, "DepthEffectCopyColor");
+	draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::DEPTH_BIT, "DepthEffectCopyDepth");
+	presentation_->RunDepthShader(dofTemp_, vfb->fbo);
+
+	RebindFramebuffer("DepthEffect");
+	gstate_c.Dirty(DIRTY_ALL_RENDER_STATE);
 }

@@ -299,6 +299,17 @@ bool PresentationCommon::UpdatePostShader(const DisplayLayoutConfig &config) {
 	bool usePreviousAtOutputResolution = false;
 	for (size_t i = 0; i < shaderInfo.size(); ++i) {
 		const ShaderInfo *next = i + 1 < shaderInfo.size() ? shaderInfo[i + 1] : nullptr;
+		if (shaderInfo[i]->useDepth) {
+			// Pulled out of the present chain, see RunDepthShader. Only one is supported.
+			if (!depthPipeline_) {
+				if (!CompilePostShader(shaderInfo[i], &depthPipeline_)) {
+					DestroyPostShader();
+					return false;
+				}
+				depthShaderInfo_ = new ShaderInfo(*shaderInfo[i]);
+			}
+			continue;
+		}
 		Draw::Pipeline *postPipeline = nullptr;
 		if (!BuildPostShader(config, shaderInfo[i], next, &postPipeline)) {
 			DestroyPostShader();
@@ -311,6 +322,12 @@ bool PresentationCommon::UpdatePostShader(const DisplayLayoutConfig &config) {
 			usePreviousFrame = true;
 			usePreviousAtOutputResolution = shaderInfo[i]->outputResolution;
 		}
+	}
+
+	if (postShaderPipelines_.empty()) {
+		// Only a depth shader was selected, nothing to run at present time.
+		usePostShader_ = false;
+		return depthPipeline_ != nullptr;
 	}
 
 	if (usePreviousFrame) {
@@ -580,6 +597,9 @@ void PresentationCommon::DestroyPostShader() {
 	DoReleaseVector(postShaderPipelines_);
 	DoReleaseVector(postShaderFramebuffers_);
 	DoReleaseVector(previousFramebuffers_);
+	DoRelease(depthPipeline_);
+	delete depthShaderInfo_;
+	depthShaderInfo_ = nullptr;
 	postShaderInfo_.clear();
 	postShaderFBOUsage_.clear();
 }
@@ -657,6 +677,49 @@ bool PresentationCommon::BindSource(int binding, bool bindStereo) {
 		_assert_(false);
 		return false;
 	}
+}
+
+void PresentationCommon::RunDepthShader(Draw::Framebuffer *src, Draw::Framebuffer *dst) {
+	if (!depthPipeline_ || !depthShaderInfo_ || !src || !dst)
+		return;
+
+	draw_->Invalidate(InvalidationFlags::CACHED_RENDER_STATE);
+
+	int w, h;
+	draw_->GetFramebufferDimensions(dst, &w, &h);
+
+	// Same orientation as the intermediate post shader passes: flip position, not UV.
+	Vertex verts[4] = {
+		{-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFFF},
+		{ 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0xFFFFFFFF},
+		{-1.0f,  1.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFF},
+		{ 1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF},
+	};
+	draw_->UpdateBuffer(vdata_, (const uint8_t *)verts, 0, sizeof(verts), Draw::UPDATE_DISCARD);
+
+	// Unbind first to avoid hazards, then keep depth/stencil of dst (the game still needs them).
+	draw_->BindTexture(0, nullptr);
+	draw_->BindFramebufferAsRenderTarget(dst, { Draw::RPAction::DONT_CARE, Draw::RPAction::KEEP, Draw::RPAction::KEEP }, "DepthEffect");
+	draw_->BindFramebufferAsTexture(src, 0, Draw::Aspect::COLOR_BIT, 0);
+	draw_->BindFramebufferAsTexture(src, 1, Draw::Aspect::COLOR_BIT, 0);
+	draw_->BindFramebufferAsTexture(src, 2, Draw::Aspect::DEPTH_BIT, 0);
+
+	Draw::Viewport viewport{ 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+	draw_->SetViewport(viewport);
+	draw_->SetScissorRect(0, 0, w, h);
+
+	PostShaderUniforms uniforms;
+	CalculatePostShaderUniforms(w, h, w, h, depthShaderInfo_, &uniforms);
+
+	draw_->BindPipeline(depthPipeline_);
+	draw_->UpdateDynamicUniformBuffer(&uniforms, sizeof(uniforms));
+
+	draw_->BindSamplerStates(0, 1, &samplerLinear_);
+	draw_->BindSamplerStates(1, 1, &samplerLinear_);
+	draw_->BindSamplerStates(2, 1, &samplerNearest_);  // Depth must not be filtered.
+
+	draw_->BindVertexBuffer(vdata_, 0);
+	draw_->Draw(4, 0);
 }
 
 void PresentationCommon::UpdateUniforms(bool hasVideo) {

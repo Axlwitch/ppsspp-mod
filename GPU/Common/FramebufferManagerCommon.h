@@ -334,6 +334,17 @@ public:
 	void SetDepthFrameBuffer(bool isClearingDepth);
 
 	void RebindFramebuffer(const char *tag);
+
+	// Depth-aware post effect (DOF) that must not touch the HUD. Call ShouldApplyDepthEffect for every
+	// non-skipped prim; when it returns true, flush queued draws, then call ApplyDepthEffect.
+	// ResetDepthEffectFrame must be called once per emulated frame (on flip).
+	bool ShouldApplyDepthEffect(VirtualFramebuffer *vfb, bool isThrough, bool isClear);
+	void ApplyDepthEffect(VirtualFramebuffer *vfb);
+	void ResetDepthEffectFrame() {
+		dofDoneThisFrame_ = false;
+		dofVfb_ = nullptr;
+		dof3DDraws_ = 0;
+	}
 	std::vector<const VirtualFramebuffer *> GetFramebufferList() const;
 
 	void PrepareCopyDisplayToOutput(const DisplayLayoutConfig &config, bool reallyDirty);
@@ -665,6 +676,12 @@ protected:
 	Draw2DPipeline *draw2DPipeline565ToDepthDeswizzle_ = nullptr;
 
 	Draw2D draw2D_;
+
+	// Depth effect state.
+	Draw::Framebuffer *dofTemp_ = nullptr;
+	VirtualFramebuffer *dofVfb_ = nullptr;  // Only compared, never dereferenced.
+	int dof3DDraws_ = 0;
+	bool dofDoneThisFrame_ = false;
 	// The fragment shaders are "owned" by the pipelines since they're 1:1.
 
 	// Depth readback helper state
