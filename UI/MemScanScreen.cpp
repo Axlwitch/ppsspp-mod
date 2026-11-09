@@ -31,6 +31,91 @@ static int g_freezeSel = -1;  // freeze yang dipilih di daftar
 static bool g_showWatch = false;  // panel kanan: false = hasil scan, true = log akses CPU
 static int g_recSel = -1;
 static std::vector<AccessRecord> g_recs;
+static int g_patchSel = -1;
+static bool g_showChains = false;  // panel kanan: daftar pointer chain
+static int g_chainSel = -1;
+static int g_chainDepth = 3;
+static int g_chainOffIdx = 1;
+static const uint32_t kChainOffs[] = { 0x100, 0x400, 0x1000 };
+
+// "nop" atau hex 32-bit (0x boleh ada).
+static bool ParseOpcode(const std::string &s, uint32_t *out) {
+	if (s.empty())
+		return false;
+	if (s == "nop" || s == "NOP") {
+		*out = 0;
+		return true;
+	}
+	char *end = nullptr;
+	unsigned long v = strtoul(s.c_str(), &end, 16);
+	if (end == s.c_str())
+		return false;
+	*out = (uint32_t)v;
+	return true;
+}
+
+// Satu cheat berisi semua patch aktif (tulis 32-bit per instruksi).
+static bool SavePatchCheat(const std::string &gameID, const std::string &name) {
+	if (gameID.empty())
+		return false;
+	std::vector<PatchEntry> list;
+	for (int i = 0; i < MemPatcher::Count(); i++) {
+		PatchEntry e;
+		if (MemPatcher::Get(i, &e) && e.enabled && e.addr >= 0x08800000)
+			list.push_back(e);
+	}
+	if (list.empty())
+		return false;
+	std::string clean = name.empty() ? "Patch instruksi" : name;
+	for (char &c : clean) {
+		if (c == '\n' || c == '\r')
+			c = ' ';
+	}
+	CWCheatEngine engine(gameID);
+	engine.CreateCheatFile();
+	FILE *f = File::OpenCFile(engine.CheatFilename(), "at");
+	if (!f)
+		return false;
+	fputc('\n', f);
+	fprintf(f, "_C0 %s\n", clean.c_str());
+	for (const PatchEntry &e : list)
+		fprintf(f, "_L 0x2%07X 0x%08X\n", (e.addr - 0x08800000) & 0x0FFFFFFF, e.value);
+	fclose(f);
+	g_Config.bReloadCheats = true;
+	return true;
+}
+
+// Cheat pointer bertingkat: base = [holder]; tiap offset selain yang terakhir = satu langkah
+// "base = [base + offset]" (dua langkah per baris); offset terakhir dipakai saat menulis.
+static bool SaveChainCheat(const std::string &gameID, const std::string &name, const PtrChain &c, int size, uint32_t value) {
+	if (gameID.empty() || c.base < 0x08800000 || c.offsets.empty())
+		return false;
+	const int type = size == 1 ? 0 : (size == 2 ? 1 : 2);
+	const size_t walks = c.offsets.size() - 1;
+	const uint32_t lines = (uint32_t)((walks + 1) / 2);
+	std::string clean = name.empty() ? "Cheat pointer chain" : name;
+	for (char &ch : clean) {
+		if (ch == '\n' || ch == '\r')
+			ch = ' ';
+	}
+	CWCheatEngine engine(gameID);
+	engine.CreateCheatFile();
+	FILE *f = File::OpenCFile(engine.CheatFilename(), "at");
+	if (!f)
+		return false;
+	fputc('\n', f);
+	fprintf(f, "_C0 %s\n", clean.c_str());
+	fprintf(f, "_L 0x6%07X 0x%08X\n", (c.base - 0x08800000) & 0x0FFFFFFF, value);
+	fprintf(f, "_L 0x%08X 0x%08X\n", ((uint32_t)type << 16) | (lines + 1), (uint32_t)c.offsets.back());
+	for (size_t i = 0; i < walks; i += 2) {
+		uint32_t p1 = 0x20000000u | ((uint32_t)c.offsets[i] & 0x0FFFFFFFu);
+		uint32_t p2 = (i + 1 < walks) ? (0x20000000u | ((uint32_t)c.offsets[i + 1] & 0x0FFFFFFFu)) : 0;
+		fprintf(f, "_L 0x%08X 0x%08X\n", p1, p2);
+	}
+	fclose(f);
+	g_Config.bReloadCheats = true;
+	return true;
+}
 
 // Cheat pointer CWCheat: pointer disimpan di ptrAddr, nilai ditulis ke [pointer + offset].
 static bool SavePointerCheat(const std::string &gameID, const std::string &name, uint32_t ptrAddr, int32_t offset, int size, uint32_t value) {
@@ -62,7 +147,8 @@ static bool SavePointerCheat(const std::string &gameID, const std::string &name,
 }
 
 static const char *const kTypeNames[] = { "8-bit", "16-bit", "32-bit (angka bulat)", "Float (pecahan)" };
-static const char *const kCmpNames[] = { "Sama dengan nilai", "Berubah", "Tidak berubah", "Naik", "Turun" };
+static const char *const kCmpNames[] = { "Sama dengan nilai", "Berubah", "Tidak berubah", "Naik", "Turun", "Naik tepat sebesar nilai", "Turun tepat sebesar nilai" };
+static const int kCmpCount = 7;
 
 static bool ParseValueRaw(const std::string &s, ScanType t, uint32_t *out);
 // Nilai dimasker sesuai ukuran data, supaya angka negatif 8/16-bit cocok dengan hasil baca.
@@ -207,8 +293,19 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 		RecreateViews();
 	});
 
+	left->Add(new Choice("Scan pertama TANPA nilai (snapshot RAM)"))->OnClick.Add([this](UI::EventParams &) {
+		g_scan.FirstUnknown(g_type);
+		g_selected = -1;
+		g_orig.clear();
+		if (g_scan.IsUnknown())
+			g_status = StringFromFormat("Snapshot siap (%u slot). Ubah keadaan di game, lalu pilih 'Saring lagi' (berubah / tidak berubah / naik / turun).", g_scan.UnknownCount());
+		else
+			g_status = "Gagal membuat snapshot (game belum berjalan?).";
+		RecreateViews();
+	});
+
 	left->Add(new Choice(std::string("Saring lagi: ") + kCmpNames[(int)g_cmp]))->OnClick.Add([this](UI::EventParams &) {
-		g_cmp = (ScanCmp)(((int)g_cmp + 1) % 5);
+		g_cmp = (ScanCmp)(((int)g_cmp + 1) % kCmpCount);
 		RecreateViews();
 	});
 
@@ -217,12 +314,15 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 			g_status = "Lakukan scan pertama dulu (bukan hasil preset widescreen).";
 		} else {
 			uint32_t raw = 0;
-			if (g_cmp == ScanCmp::Equal && !ParseValue(g_valueText, g_type, &raw)) {
+			if ((g_cmp == ScanCmp::Equal || g_cmp == ScanCmp::IncBy || g_cmp == ScanCmp::DecBy) && !ParseValue(g_valueText, g_type, &raw)) {
 				g_status = "Nilai tidak valid.";
 			} else {
 				g_scan.Next(g_cmp, raw);
 				g_selected = -1;
-				g_status = StringFromFormat("Tersisa %d alamat.", (int)g_scan.Hits().size());
+				if (g_scan.IsUnknown())
+					g_status = StringFromFormat("Kandidat tersisa %u (daftar tampil setelah <= 300000). Saring terus.", g_scan.UnknownCount());
+				else
+					g_status = StringFromFormat("Tersisa %d alamat.", (int)g_scan.Hits().size());
 			}
 		}
 		RecreateViews();
@@ -400,9 +500,11 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 	if (MemWatch::Active()) {
 		left->Add(new TextView(StringFromFormat("Memantau 0x%08X (%d byte). Memcheck membuat game lebih lambat; hentikan jika sudah selesai.", MemWatch::WatchAddr(), MemWatch::WatchSize()),
 			new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 4, 8, 4))));
+		left->Add(new TextView(MemWatch::DebugInfo(), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 2, 8, 4))));
 	}
 	left->Add(new Choice(g_showWatch ? "Panel kanan: log akses (ketuk: hasil scan)" : "Panel kanan: hasil scan (ketuk: log akses)"))->OnClick.Add([this](UI::EventParams &) {
 		g_showWatch = !g_showWatch;
+		g_showChains = false;
 		g_recSel = -1;
 		RecreateViews();
 	});
@@ -423,6 +525,32 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 		const AccessRecord &r = g_recs[g_recSel];
 		left->Add(new ItemHeader(StringFromFormat("PC 0x%08X  %s", r.pc, r.write ? "tulis" : "baca")));
 		left->Add(new TextView(r.text, new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 2, 8, 2))));
+		left->Add(new Choice(StringFromFormat("NOP instruksi ini (0x%08X)", r.pc)))->OnClick.Add([this, pc = r.pc](UI::EventParams &) {
+			int idx = MemPatcher::Add(pc, 0x00000000, "NOP");
+			if (idx >= 0) {
+				g_patchSel = idx;
+				g_status = StringFromFormat("NOP dipasang di 0x%08X. Uji di game; lihat daftar 6 untuk batal.", pc);
+			} else {
+				g_status = "Gagal memasang patch (alamat tidak valid).";
+			}
+			RecreateViews();
+		});
+		Choice *opChoice = left->Add(new Choice("Ubah opcode instruksi ini..."));
+		opChoice->OnClick.Add([this, opChoice, pc = r.pc, sm = screenManager(), token = GetRequesterToken()](UI::EventParams &) {
+			AskForInput(sm, token, opChoice, "Opcode baru (hex 8 digit, atau nop)", [this, pc](const std::string &text, bool success) {
+				if (!success)
+					return;
+				uint32_t op = 0;
+				int idx = ParseOpcode(text, &op) ? MemPatcher::Add(pc, op, "Ubah opcode") : -1;
+				if (idx >= 0) {
+					g_patchSel = idx;
+					g_status = StringFromFormat("Opcode di 0x%08X diubah ke 0x%08X.", pc, op);
+				} else {
+					g_status = "Opcode tidak valid atau alamat gagal ditulis.";
+				}
+				RecreateViews();
+			});
+		});
 		if (r.baseReg >= 0) {
 			left->Add(new TextView(StringFromFormat("Basis %s = 0x%08X, offset %d. Jika %s adalah pointer, simpanannya bisa dicari.", MemWatch::RegName(r.baseReg), r.baseValue, (int)r.offset, MemWatch::RegName(r.baseReg)),
 				new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 2, 8, 2))));
@@ -431,6 +559,7 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 				g_selected = -1;
 				g_orig.clear();
 				g_showWatch = false;
+				g_showChains = false;
 				g_status = StringFromFormat("Pemegang pointer 0x%08X: %d alamat. Pilih satu untuk dibuat cheat pointer.", base, (int)g_scan.Hits().size());
 				RecreateViews();
 			});
@@ -452,6 +581,149 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 			}
 		}
 	}
+
+	// ---- 6. Patch instruksi ----
+	left->Add(new ItemHeader(StringFromFormat("6. Patch instruksi (%d)", MemPatcher::Count())));
+	{
+		Choice *addPatch = left->Add(new Choice("Tambah patch manual (alamat + opcode)"));
+		addPatch->OnClick.Add([this, addPatch, sm = screenManager(), token = GetRequesterToken()](UI::EventParams &) {
+			AskForInput(sm, token, addPatch, "Alamat dan opcode, mis: 0x08812345 nop", [this](const std::string &text, bool success) {
+				if (!success)
+					return;
+				size_t sp = text.find(' ');
+				if (sp == std::string::npos) {
+					g_status = "Format: <alamat> <opcode>, mis. 0x08812345 nop";
+					RecreateViews();
+					return;
+				}
+				char *end = nullptr;
+				uint32_t addr = (uint32_t)strtoul(text.substr(0, sp).c_str(), &end, 0);
+				uint32_t op = 0;
+				std::string rest = text.substr(sp + 1);
+				int idx = ParseOpcode(rest, &op) ? MemPatcher::Add(addr, op, "Manual") : -1;
+				if (idx >= 0) {
+					g_patchSel = idx;
+					g_status = StringFromFormat("Patch dipasang di 0x%08X.", addr);
+				} else {
+					g_status = "Gagal: alamat harus kelipatan 4 dan valid, opcode hex atau nop.";
+				}
+				RecreateViews();
+			});
+		});
+	}
+	for (int i = 0; i < MemPatcher::Count(); i++) {
+		PatchEntry e;
+		if (!MemPatcher::Get(i, &e))
+			continue;
+		std::string label = StringFromFormat("%s%s 0x%08X  %s -> %08X", i == g_patchSel ? "> " : "", e.enabled ? "[ON]" : "[OFF]", e.addr, e.origText.c_str(), e.value);
+		left->Add(new Choice(label))->OnClick.Add([this, i](UI::EventParams &) {
+			g_patchSel = i;
+			RecreateViews();
+		});
+	}
+	{
+		PatchEntry sp;
+		if (MemPatcher::Get(g_patchSel, &sp)) {
+			left->Add(new Choice(sp.enabled ? "Matikan patch ini (kembalikan asli)" : "Nyalakan patch ini"))->OnClick.Add([this](UI::EventParams &) {
+				PatchEntry e;
+				if (MemPatcher::Get(g_patchSel, &e))
+					MemPatcher::SetEnabled(g_patchSel, !e.enabled);
+				RecreateViews();
+			});
+			left->Add(new Choice("Hapus patch ini (kembalikan asli)"))->OnClick.Add([this](UI::EventParams &) {
+				MemPatcher::Remove(g_patchSel);
+				g_patchSel = -1;
+				RecreateViews();
+			});
+		}
+	}
+	if (MemPatcher::Count() > 0) {
+		Choice *savePatch = left->Add(new Choice("Simpan semua patch aktif jadi satu cheat"));
+		savePatch->OnClick.Add([this, savePatch, sm = screenManager(), token = GetRequesterToken()](UI::EventParams &) {
+			AskForInput(sm, token, savePatch, "Nama cheat", [this](const std::string &text, bool success) {
+				if (!success)
+					return;
+				g_status = SavePatchCheat(gameID_, text) ? "Cheat patch disimpan (nonaktif). Aktifkan di daftar cheat." : "Gagal menyimpan (tidak ada patch aktif di RAM user).";
+				RecreateViews();
+			});
+		});
+	}
+
+	// ---- 7. Pointer chain ----
+	left->Add(new ItemHeader(StringFromFormat("7. Pointer chain (%d)", (int)PointerScanner::Results().size())));
+	left->Add(new Choice(StringFromFormat("Kedalaman maks: %d", g_chainDepth)))->OnClick.Add([this](UI::EventParams &) {
+		g_chainDepth = g_chainDepth % 4 + 1;
+		RecreateViews();
+	});
+	left->Add(new Choice(StringFromFormat("Jarak offset maks: 0x%X", kChainOffs[g_chainOffIdx])))->OnClick.Add([this](UI::EventParams &) {
+		g_chainOffIdx = (g_chainOffIdx + 1) % 3;
+		RecreateViews();
+	});
+	{
+		const auto &hs = g_scan.Hits();
+		const bool haveHit = g_selected >= 0 && g_selected < (int)hs.size() && hs[g_selected].kind == HitKind::Value;
+		if (haveHit) {
+			left->Add(new Choice(StringFromFormat("Cari chain ke 0x%08X", hs[g_selected].addr)))->OnClick.Add([this](UI::EventParams &) {
+				const auto &hits = g_scan.Hits();
+				if (g_selected >= 0 && g_selected < (int)hits.size()) {
+					const ScanHit &h = hits[g_selected];
+					int n = PointerScanner::Scan(h.addr, h.size, g_chainDepth, kChainOffs[g_chainOffIdx]);
+					g_showChains = true;
+					g_showWatch = false;
+					g_chainSel = -1;
+					g_status = StringFromFormat("Ditemukan %d chain. Pindah stage, cari alamat baru, lalu 'Saring chain untuk alamat terpilih'.", n);
+				}
+				RecreateViews();
+			});
+			if (!PointerScanner::Results().empty()) {
+				left->Add(new Choice(StringFromFormat("Saring chain untuk 0x%08X (alamat baru)", hs[g_selected].addr)))->OnClick.Add([this](UI::EventParams &) {
+					const auto &hits = g_scan.Hits();
+					if (g_selected >= 0 && g_selected < (int)hits.size()) {
+						int n = PointerScanner::FilterFor(hits[g_selected].addr);
+						g_showChains = true;
+						g_showWatch = false;
+						g_chainSel = -1;
+						g_status = StringFromFormat("Tersisa %d chain yang menunjuk ke 0x%08X. Ulangi di stage lain sampai tinggal sedikit.", n, hits[g_selected].addr);
+					}
+					RecreateViews();
+				});
+			}
+		}
+	}
+	if (!PointerScanner::Results().empty()) {
+		left->Add(new Choice(g_showChains ? "Panel kanan: chain (ketuk: hasil scan)" : "Panel kanan: hasil scan (ketuk: chain)"))->OnClick.Add([this](UI::EventParams &) {
+			g_showChains = !g_showChains;
+			g_showWatch = false;
+			RecreateViews();
+		});
+		left->Add(new Choice("Hapus daftar chain"))->OnClick.Add([this](UI::EventParams &) {
+			PointerScanner::Clear();
+			g_chainSel = -1;
+			g_showChains = false;
+			RecreateViews();
+		});
+	}
+	{
+		const auto &chains = PointerScanner::Results();
+		if (g_chainSel >= 0 && g_chainSel < (int)chains.size()) {
+			const PtrChain &c = chains[g_chainSel];
+			uint32_t cur = 0;
+			bool ok = PointerScanner::Resolve(c, &cur);
+			left->Add(new ItemHeader(ok ? StringFromFormat("Chain -> 0x%08X sekarang%s", cur, cur == PointerScanner::Target() ? " (cocok)" : " (beda)") : std::string("Chain tidak valid sekarang")));
+			left->Add(new TextView(PointerScanner::Describe(c), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 2, 8, 2))));
+			Choice *saveChain = left->Add(new Choice("Simpan cheat dari chain ini"));
+			saveChain->OnClick.Add([this, saveChain, c, sm = screenManager(), token = GetRequesterToken()](UI::EventParams &) {
+				AskForInput(sm, token, saveChain, "Nama cheat", [this, c](const std::string &text, bool success) {
+					if (!success)
+						return;
+					int sz = PointerScanner::TargetSize();
+					uint32_t val = MemScanner::ReadAt(PointerScanner::Target(), sz);
+					g_status = SaveChainCheat(gameID_, text, c, sz, val) ? "Cheat pointer disimpan (nonaktif) dengan nilai saat ini. Aktifkan di daftar cheat." : "Gagal menyimpan chain.";
+					RecreateViews();
+				});
+			});
+		}
+	}
 }
 
 void MemScanScreen::CreateContentViews(UI::ViewGroup *parent) {
@@ -465,6 +737,23 @@ void MemScanScreen::CreateContentViews(UI::ViewGroup *parent) {
 	LinearLayout *column = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(200, FILL_PARENT));
 	column->SetSpacing(0.0f);
 	scroll->Add(column);
+
+	if (g_showChains) {
+		const auto &chains = PointerScanner::Results();
+		const int climit = (int)std::min<size_t>(chains.size(), 300);
+		for (int i = 0; i < climit; i++) {
+			uint32_t cur = 0;
+			bool ok = PointerScanner::Resolve(chains[i], &cur);
+			std::string label = StringFromFormat("%s%s %s", i == g_chainSel ? "> " : "", (ok && cur == PointerScanner::Target()) ? "[OK]" : "[--]", PointerScanner::Describe(chains[i]).c_str());
+			column->Add(new Choice(label))->OnClick.Add([this, i](UI::EventParams &) {
+				g_chainSel = i;
+				RecreateViews();
+			});
+		}
+		if (chains.empty())
+			column->Add(new TextView("Tidak ada chain.", new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT, UI::Margins(8, 8, 8, 8))));
+		return;
+	}
 
 	if (g_showWatch) {
 		g_recs = MemWatch::Snapshot();
