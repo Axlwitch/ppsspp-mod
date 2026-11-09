@@ -22,6 +22,7 @@
 #include "Core/Core.h"
 #include "Core/Debugger/WebSocket.h"
 #include "Core/Debugger/Breakpoints.h"
+#include "Core/MemScan.h"
 #include "Core/Debugger/LineInfo.h"
 #include "Core/Debugger/MemBlockInfo.h"
 #include "Core/Debugger/SymbolMap.h"
@@ -55,6 +56,7 @@ BreakAction MemCheck::Apply(u32 addr, bool write, int size, u32 pc) {
 		}
 
 		++numHits;
+		MemWatch::Record(start, end, addr, write, size, pc);  // pantau akses (MemScan)
 		return action;
 	}
 
