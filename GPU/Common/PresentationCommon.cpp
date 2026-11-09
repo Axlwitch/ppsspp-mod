@@ -307,6 +307,7 @@ bool PresentationCommon::UpdatePostShader(const DisplayLayoutConfig &config) {
 					return false;
 				}
 				depthShaderInfo_ = new ShaderInfo(*shaderInfo[i]);
+				g_OSD.Show(OSDType::MESSAGE_SUCCESS, "DOF: shader depth berhasil dikompilasi", 3.0f);
 			}
 			continue;
 		}

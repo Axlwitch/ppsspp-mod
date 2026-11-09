@@ -33,6 +33,7 @@
 #include "Core/CoreParameter.h"
 #include "Core/Debugger/MemBlockInfo.h"
 #include "GPU/Common/DrawEngineCommon.h"
+#include "Common/System/OSD.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Common/PresentationCommon.h"
 #include "GPU/Common/TextureCacheCommon.h"
@@ -2960,7 +2961,9 @@ void FramebufferManagerCommon::DestroyAllFBOs() {
 		dofTemp_->Release();
 		dofTemp_ = nullptr;
 	}
-	ResetDepthEffectFrame();
+	dofDoneThisFrame_ = false;
+	dofVfb_ = nullptr;
+	dof3DDraws_ = 0;
 	DiscardFramebufferCopy();
 	currentRenderVfb_ = nullptr;
 	displayFramebuf_ = nullptr;
@@ -3777,13 +3780,25 @@ bool FramebufferManagerCommon::ShouldApplyDepthEffect(VirtualFramebuffer *vfb, b
 		dof3DDraws_++;
 		return false;
 	}
-	return vfb == dofVfb_ && dof3DDraws_ >= kDepthEffectMinSceneDraws && vfb->width >= 256;
+	if (vfb != dofVfb_) {
+		dofDbgMismatch_++;
+		return false;
+	}
+	dofDbgThrough_++;
+	return dof3DDraws_ >= kDepthEffectMinSceneDraws && vfb->width >= 256;
 }
 
 void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	dofDoneThisFrame_ = true;
-	if (!vfb || !vfb->fbo || GetFramebufferLayers() > 1)
+	if (!vfb || !vfb->fbo || GetFramebufferLayers() > 1) {
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: dilewati (stereo/vfb tidak valid)", 4.0f);
 		return;
+	}
+
+	if (!draw_->GetDeviceCaps().textureDepthSupported) {
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak bisa membaca depth sebagai tekstur", 4.0f);
+		return;
+	}
 
 	const int w = vfb->renderWidth;
 	const int h = vfb->renderHeight;
@@ -3797,15 +3812,60 @@ void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	}
 	if (!dofTemp_) {
 		dofTemp_ = draw_->CreateFramebuffer({ w, h, 1, 1, 0, true, "dof_temp" });
-		if (!dofTemp_)
+		if (!dofTemp_) {
+			g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: gagal membuat FBO sementara (color+depth)", 4.0f);
 			return;
+		}
 	}
 
 	// The effect samples color and depth from a copy, since vfb->fbo is the render target.
-	draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::COLOR_BIT, "DepthEffectCopyColor");
-	draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::DEPTH_BIT, "DepthEffectCopyDepth");
+	// Which copy methods work depends on the GPU/driver, so follow the same caps logic as BlitFramebufferDepth.
+	const Draw::DeviceCaps &caps = draw_->GetDeviceCaps();
+
+	if (caps.framebufferCopySupported) {
+		draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::COLOR_BIT, "DepthEffectCopyColor");
+	} else if (caps.framebufferBlitSupported) {
+		draw_->BlitFramebuffer(vfb->fbo, 0, 0, w, h, dofTemp_, 0, 0, w, h, Draw::Aspect::COLOR_BIT, Draw::FB_BLIT_NEAREST, "DepthEffectBlitColor");
+	} else {
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak mendukung salin/blit warna", 4.0f);
+		return;
+	}
+
+	const bool useRaster = caps.fragmentShaderDepthWriteSupported && caps.textureDepthSupported;
+	const bool useCopy = caps.framebufferSeparateDepthCopySupported || (!caps.framebufferDepthBlitSupported && caps.framebufferCopySupported);
+	const bool useBlit = caps.framebufferDepthBlitSupported;
+	if (useRaster) {
+		BlitUsingRaster(vfb->fbo, 0, 0, w, h, dofTemp_, 0, 0, w, h, false, vfb->renderScaleFactor, Get2DPipeline(Draw2DShader::DRAW2D_COPY_DEPTH), "DepthEffectDepthRaster");
+	} else if (useCopy) {
+		draw_->CopyFramebufferImage(vfb->fbo, 0, 0, 0, 0, dofTemp_, 0, 0, 0, 0, w, h, 1, Draw::Aspect::DEPTH_BIT, "DepthEffectCopyDepth");
+	} else if (useBlit) {
+		draw_->BlitFramebuffer(vfb->fbo, 0, 0, w, h, dofTemp_, 0, 0, w, h, Draw::Aspect::DEPTH_BIT, Draw::FB_BLIT_NEAREST, "DepthEffectBlitDepth");
+	} else {
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak mendukung salin depth", 4.0f);
+		RebindFramebuffer("DepthEffect");
+		gstate_c.Dirty(DIRTY_ALL_RENDER_STATE);
+		return;
+	}
 	presentation_->RunDepthShader(dofTemp_, vfb->fbo);
 
 	RebindFramebuffer("DepthEffect");
 	gstate_c.Dirty(DIRTY_ALL_RENDER_STATE);
+	dofDbgApplied_++;
+}
+
+void FramebufferManagerCommon::ResetDepthEffectFrame() {
+	// Status every ~120 emulated frames, so we can see why the effect does (not) run.
+	if (presentation_ && (++dofDbgFlips_ % 120) == 0) {
+		g_OSD.Show(OSDType::MESSAGE_INFO,
+			std::string("DOF dbg: shader=") + (presentation_->HasDepthShader() ? "1" : "0") +
+			" 3D=" + std::to_string(dof3DDraws_) +
+			" thru=" + std::to_string(dofDbgThrough_) +
+			" mism=" + std::to_string(dofDbgMismatch_) +
+			" applied=" + std::to_string(dofDbgApplied_), 4.0f);
+	}
+	dofDoneThisFrame_ = false;
+	dofVfb_ = nullptr;
+	dof3DDraws_ = 0;
+	dofDbgThrough_ = 0;
+	dofDbgMismatch_ = 0;
 }

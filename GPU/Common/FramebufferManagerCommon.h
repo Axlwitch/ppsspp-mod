@@ -340,11 +340,7 @@ public:
 	// ResetDepthEffectFrame must be called once per emulated frame (on flip).
 	bool ShouldApplyDepthEffect(VirtualFramebuffer *vfb, bool isThrough, bool isClear);
 	void ApplyDepthEffect(VirtualFramebuffer *vfb);
-	void ResetDepthEffectFrame() {
-		dofDoneThisFrame_ = false;
-		dofVfb_ = nullptr;
-		dof3DDraws_ = 0;
-	}
+	void ResetDepthEffectFrame();
 	std::vector<const VirtualFramebuffer *> GetFramebufferList() const;
 
 	void PrepareCopyDisplayToOutput(const DisplayLayoutConfig &config, bool reallyDirty);
@@ -682,6 +678,11 @@ protected:
 	VirtualFramebuffer *dofVfb_ = nullptr;  // Only compared, never dereferenced.
 	int dof3DDraws_ = 0;
 	bool dofDoneThisFrame_ = false;
+	// Debug counters shown on the OSD.
+	int dofDbgThrough_ = 0;
+	int dofDbgMismatch_ = 0;
+	int dofDbgApplied_ = 0;
+	int dofDbgFlips_ = 0;
 	// The fragment shaders are "owned" by the pipelines since they're 1:1.
 
 	// Depth readback helper state
