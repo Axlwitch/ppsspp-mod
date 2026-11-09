@@ -12,6 +12,7 @@
 #include "Core/CoreTiming.h"
 #include "Core/CoreParameter.h"
 #include "Core/CwCheat.h"
+#include "Core/MemScan.h"
 #include "Core/Config.h"
 #include "Core/MemMapHelpers.h"
 #include "Core/MIPS/MIPS.h"
@@ -235,7 +236,8 @@ static void __CheatStart() {
 static int GetRefreshMs() {
 	int refresh = g_Config.iCwCheatRefreshIntervalMs;
 
-	if (!cheatsEnabled)
+	// Jika ada freeze aktif, jangan melambat ke 1 detik walau cheat dimatikan.
+	if (!cheatsEnabled && MemFreezer::Count() == 0)
 		refresh = 1000;
 
 	// Horrible hack for Tony Hawk - Underground 2. See #3854. Avoids crashing somehow
@@ -318,6 +320,8 @@ void hleCheat(u64 userdata, int cyclesLate) {
 			currentMIPS->InvalidateICacheRangeDeferred(0x0886E258, 4);
 		}
 	}
+
+	MemFreezer::Apply();  // freeze dari layar Cari Memori; harus sebelum return di bawah
 
 	if (!cheatEngine || !cheatsEnabled) {
 		return;
