@@ -259,10 +259,10 @@ void MemFreezer::Apply() {
 		if (!e.enabled || !Memory::IsValidRange(e.addr, e.size))
 			continue;
 		// Tulis hanya jika berbeda (hemat, dan tidak membatalkan cache JIT terus-menerus).
-		if (ReadAt(e.addr, e.size) == e.value)
+		if (MemScanner::ReadAt(e.addr, e.size) == e.value)
 			continue;
 		if (e.kind == HitKind::Lui)
-			WriteAt(e.addr, e.size, e.value);  // dengan invalidate JIT
+			MemScanner::WriteAt(e.addr, e.size, e.value);  // dengan invalidate JIT
 		else if (e.size == 1)
 			Memory::WriteUnchecked_U8((uint8_t)e.value, e.addr);
 		else if (e.size == 2)
