@@ -1,4 +1,4 @@
-// Copyright (c) 2012- PPSSPP Project.
+// Copyright (c) 2013- PPSSPP Project.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,960 +15,558 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
+#include <functional>
+#include <mutex>
+#include <set>
+#include <unordered_map>
+#include <vector>
 
-#include "Common/System/System.h"
-#include "Common/Log.h"
-#include "Core/Core.h"
-#include "Core/Debugger/WebSocket.h"
-#include "Core/Debugger/Breakpoints.h"
-#include "Core/MemScan.h"
-#include "Core/Debugger/LineInfo.h"
-#include "Core/Debugger/MemBlockInfo.h"
-#include "Core/Debugger/SymbolMap.h"
-#include "Core/MemMap.h"
-#include "Core/MIPS/MIPSAnalyst.h"
-#include "Core/MIPS/MIPSDebugInterface.h"
-#include "Core/MIPS/JitCommon/JitCommon.h"
-#include "Core/CoreTiming.h"
+#include "Common/CommonFuncs.h"
+#include "GPU/Debugger/Breakpoints.h"
+#include "GPU/Debugger/GECommandTable.h"
+#include "GPU/GPUState.h"
 
-BreakpointManager g_breakpoints;
+// These are commands we run before breaking on a texture.
+// They are commands that affect the decoding of the texture.
+static constexpr u8 textureRelatedCmds[] = {
+	GE_CMD_TEXADDR0, GE_CMD_TEXADDR1, GE_CMD_TEXADDR2, GE_CMD_TEXADDR3, GE_CMD_TEXADDR4, GE_CMD_TEXADDR5, GE_CMD_TEXADDR6, GE_CMD_TEXADDR7,
+	GE_CMD_TEXBUFWIDTH0, GE_CMD_TEXBUFWIDTH1, GE_CMD_TEXBUFWIDTH2, GE_CMD_TEXBUFWIDTH3, GE_CMD_TEXBUFWIDTH4, GE_CMD_TEXBUFWIDTH5, GE_CMD_TEXBUFWIDTH6, GE_CMD_TEXBUFWIDTH7,
+	GE_CMD_TEXSIZE0, GE_CMD_TEXSIZE1, GE_CMD_TEXSIZE2, GE_CMD_TEXSIZE3, GE_CMD_TEXSIZE4, GE_CMD_TEXSIZE5, GE_CMD_TEXSIZE6, GE_CMD_TEXSIZE7,
 
-void MemCheck::Log(u32 addr, bool write, int size, u32 pc, const char *reason) const {
-	if (action & BREAK_ACTION_LOG) {
-		const char *type = write ? "Write" : "Read";
-		if (logFormat.empty()) {
-			NOTICE_LOG(Log::MemMap, "CHK %s%i(%s) at %08x (%s), PC=%08x (%s)", type, size * 8, reason, addr, g_symbolMap->GetDescription(addr).c_str(), pc, g_symbolMap->GetDescription(pc).c_str());
+	GE_CMD_CLUTADDR, GE_CMD_CLUTADDRUPPER, GE_CMD_LOADCLUT, GE_CMD_CLUTFORMAT,
+	GE_CMD_TEXFORMAT, GE_CMD_TEXMODE, GE_CMD_TEXTUREMAPENABLE,
+	GE_CMD_TEXFILTER, GE_CMD_TEXWRAP,
+	GE_CMD_TEXLEVEL,
+
+	// Sometimes found between clut/texture params.
+	GE_CMD_TEXFLUSH, GE_CMD_TEXSYNC,
+};
+
+GPUBreakpoints::GPUBreakpoints() {
+	ClearAllBreakpoints();
+
+	nonTextureCmds.clear();
+	nonTextureCmds.resize(256, true);
+	for (size_t i = 0; i < ARRAY_SIZE(textureRelatedCmds); ++i) {
+		nonTextureCmds[textureRelatedCmds[i]] = false;
+	}
+}
+
+void GPUBreakpoints::AddNonTextureTempBreakpoints() {
+	for (int i = 0; i < 256; ++i) {
+		if (nonTextureCmds[i]) {
+			AddCmdBreakpoint(i, true);
+		}
+	}
+}
+
+static u32 GetAdjustedTextureAddress(u32 op) {
+	const u8 cmd = op >> 24;
+	bool interesting = (cmd >= GE_CMD_TEXADDR0 && cmd <= GE_CMD_TEXADDR7);
+	interesting = interesting || (cmd >= GE_CMD_TEXBUFWIDTH0 && cmd <= GE_CMD_TEXBUFWIDTH7);
+
+	if (!interesting) {
+		return (u32)-1;
+	}
+
+	int level = cmd <= GE_CMD_TEXADDR7 ? cmd - GE_CMD_TEXADDR0 : cmd - GE_CMD_TEXBUFWIDTH0;
+	u32 addr;
+
+	// Okay, so would this op modify the low or high part?
+	if (cmd <= GE_CMD_TEXADDR7) {
+		addr = (op & 0xFFFFF0) | ((gstate.texbufwidth[level] << 8) & 0x0F000000);
+	} else {
+		addr = (gstate.texaddr[level] & 0xFFFFF0) | ((op << 8) & 0x0F000000);
+	}
+
+	return addr;
+}
+
+static u32 GetAdjustedRenderTargetAddress(u32 op) {
+	const u8 cmd = op >> 24;
+	switch (cmd) {
+	case GE_CMD_FRAMEBUFPTR:
+	case GE_CMD_ZBUFPTR:
+		return op & 0x001FFFF0;
+	}
+
+	return (u32)-1;
+}
+
+// Note: this now always returns false, but still needs to be called.
+void GPUBreakpoints::CheckForTextureChange(u32 op, u32 addr) {
+	if (!textureChangeTemp) {
+		return;
+	}
+
+	const u8 cmd = op >> 24;
+	bool enabled = gstate.isTextureMapEnabled();
+
+	// Only for level 0.
+	if (cmd != GE_CMD_TEXADDR0 && cmd != GE_CMD_TEXBUFWIDTH0) {
+		// But we don't break when it's not enabled.
+		if (cmd == GE_CMD_TEXTUREMAPENABLE) {
+			enabled = (op & 1) != 0;
 		} else {
-			std::string formatted;
-			g_breakpoints.EvaluateLogFormat(currentDebugMIPS, logFormat, formatted);
-			NOTICE_LOG(Log::MemMap, "CHK %s%i(%s) at %08x: %s", type, size * 8, reason, addr, formatted.c_str());
+			return;
 		}
 	}
-}
+	if (enabled && addr != lastTexture) {
+		textureChangeTemp = false;
+		lastTexture = addr;
 
-BreakAction MemCheck::Apply(u32 addr, bool write, int size, u32 pc) {
-	int condMask = write ? MEMCHECK_WRITE : MEMCHECK_READ;
-	if (cond & condMask) {
-		if (hasCondition) {
-			if (!condition.Evaluate())
-				return BREAK_ACTION_NONE;
-		}
-
-		++numHits;
-		MemWatch::Record(start, end, addr, write, size, pc);  // pantau akses (MemScan)
-		return action;
+		// Silently convert to a primitive breakpoint, so we stop on use.
+		// Note: this may cause "spurious" breaks if the tex is changed and the changed back.
+		AddCmdBreakpoint(GE_CMD_PRIM, true);
+		AddCmdBreakpoint(GE_CMD_BEZIER, true);
+		AddCmdBreakpoint(GE_CMD_SPLINE, true);
+		AddCmdBreakpoint(GE_CMD_VAP, true);
 	}
-
-	return BREAK_ACTION_NONE;
 }
 
-BreakAction MemCheck::Action(u32 addr, bool write, int size, u32 pc, const char *reason) {
-	// Conditions have always already been checked if we get here.
-	Log(addr, write, size, pc, reason);
-
-	BreakpointHit hit;
-	if (WebSocketDebuggerHasClients() || (action & BREAK_ACTION_PAUSE)) {
-		hit.kind = BreakpointKind::Memory;
-		hit.pc = pc;
-		hit.address = addr;
-		hit.size = size;
-		hit.write = write;
-		hit.rangeStart = start;
-		hit.rangeEnd = end;
-		// This is a copy of the stored memcheck, taken after Apply() bumped the count, so it's
-		// already the post-hit value.
-		hit.numHits = numHits;
-		hit.logged = (action & BREAK_ACTION_LOG) != 0;
-		hit.paused = (action & BREAK_ACTION_PAUSE) != 0;
-		if (hasCondition)
-			hit.condition = condition.expressionString;
-		if (reason)
-			hit.source = reason;
-		WebSocketNotifyBreakpointHit(hit);
-	}
-
-	if (action & BREAK_ACTION_PAUSE) {
-		// relatedAddress stays the range start for compatibility - the address actually touched
-		// is in the hit, which is the whole point of it.
-		Core_Break(BreakReason::MemoryBreakpoint, start, &hit);
-	}
-	return action;
-}
-
-size_t BreakpointManager::FindBreakpoint(u32 addr) {
-	for (size_t i = 0; i < breakPoints_.size(); ++i) {
-		if (breakPoints_[i].addr == addr)
-			return i;
-	}
-
-	return INVALID_BREAKPOINT;
-}
-
-void BreakpointManager::UpdateAnyBreakPoints() {
-	anyBreakPoints_ = !breakPoints_.empty() || tempBreakPoint_.valid;
-}
-
-size_t BreakpointManager::FindMemCheck(u32 start, u32 end) {
-	for (size_t i = 0; i < memChecks_.size(); ++i) {
-		if (memChecks_[i].start == start && memChecks_[i].end == end)
-			return i;
-	}
-
-	return INVALID_MEMCHECK;
-}
-
-size_t BreakpointManager::FindRegBreakpoint(int reg) {
-	for (size_t i = 0; i < regBreakpoints_.size(); ++i) {
-		if (regBreakpoints_[i].reg == reg)
-			return i;
-	}
-
-	return INVALID_REG_BREAKPOINT;
-}
-
-bool BreakpointManager::IsAddressBreakPoint(u32 addr) {
-	if (!anyBreakPoints_)
-		return false;
-	size_t bp = FindBreakpoint(addr);
-	if (bp == INVALID_BREAKPOINT) {
+bool GPUBreakpoints::IsTextureCmdBreakpoint(u32 op) {
+	const u32 addr = GetAdjustedTextureAddress(op);
+	if (addr != (u32)-1) {
+		CheckForTextureChange(op, addr);
+		return IsTextureBreakpoint(addr);
+	} else {
+		CheckForTextureChange(op, gstate.getTextureAddress(0));
 		return false;
 	}
-	return breakPoints_[bp].action != BREAK_ACTION_NONE;
 }
 
-bool BreakpointManager::IsAddressBreakPoint(u32 addr, bool* enabled) {
-	if (!anyBreakPoints_)
-		return false;
-	size_t bp = FindBreakpoint(addr);
-	if (bp == INVALID_BREAKPOINT) {
-		return false;
+bool GPUBreakpoints::IsRenderTargetCmdBreakpoint(u32 op) {
+	const u32 addr = GetAdjustedRenderTargetAddress(op);
+	if (addr != (u32)-1) {
+		return IsRenderTargetBreakpoint(addr);
 	}
-	if (enabled != nullptr) {
-		*enabled = breakPoints_[bp].IsEnabled();
+	return false;
+}
+
+static bool HitBreakpointCond(GPUBreakpoints::BreakpointInfo &bp, u32 op) {
+	u8 cmd = op >> 24;
+
+	// Temporarily set the value while running the breakpoint.
+	// It makes more intuitive sense for the referenced data to already be set.
+	// Note this won't perform actions, like matrix uploads.
+	u32 diff = gstate.cmdmem[cmd] ^ op;
+	gstate.cmdmem[cmd] ^= diff;
+
+	u32 result = 1;
+	if (!GPUDebugExecExpression(gpu, bp.expression, result))
+		result = 0;
+
+	gstate.cmdmem[cmd] ^= diff;
+	return result != 0;
+}
+
+bool GPUBreakpoints::HitAddressBreakpoint(u32 pc, u32 op) {
+	if (breakPCsCount == 0)
+		return false;
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	auto entry = breakPCs.find(pc);
+	if (entry == breakPCs.end())
+		return false;
+
+	if (entry->second.isConditional) {
+		return HitBreakpointCond(entry->second, op);
 	}
 	return true;
 }
 
-bool BreakpointManager::NeedsBreakCheckAt(u32 addr) {
-	if (!anyBreakPoints_)
+bool GPUBreakpoints::HitOpBreakpoint(u32 op) {
+	u8 cmd = op >> 24;
+	if (!IsCmdBreakpoint(cmd))
 		return false;
-	if (tempBreakPoint_.valid && tempBreakPoint_.addr == addr)
-		return true;
-	size_t bp = FindBreakpoint(addr);
-	return bp != INVALID_BREAKPOINT && breakPoints_[bp].action != BREAK_ACTION_NONE;
+
+	if (breakCmdsInfo[cmd].isConditional) {
+		std::lock_guard<std::mutex> guard(breaksLock);
+		return HitBreakpointCond(breakCmdsInfo[cmd], op);
+	}
+
+	return true;
 }
 
-bool BreakpointManager::RangeContainsBreakPoint(u32 addr, u32 size)
-{
-	if (!anyBreakPoints_)
-		return false;
-	const u32 end = addr + size;
-	if (tempBreakPoint_.valid && tempBreakPoint_.addr >= addr && tempBreakPoint_.addr < end)
+bool GPUBreakpoints::IsBreakpoint(u32 pc, u32 op) {
+	if (HitAddressBreakpoint(pc, op) || HitOpBreakpoint(op)) {
 		return true;
-	for (const auto &bp : breakPoints_)
-	{
-		if (bp.addr >= addr && bp.addr < end)
+	}
+
+	if ((breakTexturesCount != 0 || textureChangeTemp) && IsTextureCmdBreakpoint(op)) {
+		// Break on the next non-texture.
+		AddNonTextureTempBreakpoints();
+	}
+	if (breakRenderTargetsCount != 0 && IsRenderTargetCmdBreakpoint(op)) {
+		return true;
+	}
+
+	return false;
+}
+
+bool GPUBreakpoints::IsAddressBreakpoint(u32 addr, bool &temp) {
+	if (breakPCsCount == 0) {
+		temp = false;
+		return false;
+	}
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	temp = breakPCsTemp.find(addr) != breakPCsTemp.end();
+	return breakPCs.find(addr) != breakPCs.end();
+}
+
+bool GPUBreakpoints::IsAddressBreakpoint(u32 addr) {
+	if (breakPCsCount == 0) {
+		return false;
+	}
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	return breakPCs.find(addr) != breakPCs.end();
+}
+
+bool GPUBreakpoints::IsTextureBreakpoint(u32 addr, bool &temp) {
+	if (breakTexturesCount == 0) {
+		temp = false;
+		return false;
+	}
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	temp = breakTexturesTemp.find(addr) != breakTexturesTemp.end();
+	return breakTextures.find(addr) != breakTextures.end();
+}
+
+bool GPUBreakpoints::IsTextureBreakpoint(u32 addr) {
+	if (breakTexturesCount == 0) {
+		return false;
+	}
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	return breakTextures.find(addr) != breakTextures.end();
+}
+
+bool GPUBreakpoints::IsRenderTargetBreakpoint(u32 addr, bool &temp) {
+	if (breakRenderTargetsCount == 0) {
+		temp = false;
+		return false;
+	}
+
+	addr &= 0x001FFFF0;
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	temp = breakRenderTargetsTemp.find(addr) != breakRenderTargetsTemp.end();
+	return breakRenderTargets.find(addr) != breakRenderTargets.end();
+}
+
+bool GPUBreakpoints::IsRenderTargetBreakpoint(u32 addr) {
+	if (breakRenderTargetsCount == 0) {
+		return false;
+	}
+
+	addr &= 0x001FFFF0;
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	return breakRenderTargets.find(addr) != breakRenderTargets.end();
+}
+
+bool GPUBreakpoints::IsOpBreakpoint(u32 op, bool &temp) const {
+	return IsCmdBreakpoint(op >> 24, temp);
+}
+
+bool GPUBreakpoints::IsOpBreakpoint(u32 op) const {
+	return IsCmdBreakpoint(op >> 24);
+}
+
+bool GPUBreakpoints::IsCmdBreakpoint(u8 cmd, bool &temp) const {
+	temp = breakCmdsTemp[cmd];
+	return breakCmds[cmd];
+}
+
+bool GPUBreakpoints::IsCmdBreakpoint(u8 cmd) const {
+	return breakCmds[cmd];
+}
+
+bool GPUBreakpoints::HasAnyBreakpoints() const {
+	if (breakPCsCount != 0 || breakTexturesCount != 0 || breakRenderTargetsCount != 0)
+		return true;
+	if (textureChangeTemp)
+		return true;
+
+	for (int i = 0; i < 256; ++i) {
+		if (breakCmds[i] || breakCmdsTemp[i])
 			return true;
 	}
 
 	return false;
 }
 
-int BreakpointManager::AddBreakPoint(u32 addr) {
-	if (addr & 3) {
-		WARN_LOG(Log::Debugger, "Breakpoint added at %08x will not be effective - unaligned address.", addr);
-	}
+void GPUBreakpoints::AddAddressBreakpoint(u32 addr, bool temp) {
+	std::lock_guard<std::mutex> guard(breaksLock);
 
-	size_t bp = FindBreakpoint(addr);
-	if (bp == INVALID_BREAKPOINT) {
-		BreakPoint pt;
-		pt.action |= BREAK_ACTION_PAUSE;
-		pt.addr = addr;
-
-		breakPoints_.push_back(pt);
-		UpdateAnyBreakPoints();
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-		System_Notify(SystemNotification::DISASSEMBLY);
-		return (int)breakPoints_.size() - 1;
-	} else if (!breakPoints_[bp].IsEnabled()) {
-		breakPoints_[bp].action |= BREAK_ACTION_PAUSE;
-		breakPoints_[bp].hasCond = false;
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-		System_Notify(SystemNotification::DISASSEMBLY);
-		return (int)bp;
+	if (temp) {
+		if (breakPCs.find(addr) == breakPCs.end()) {
+			breakPCsTemp.insert(addr);
+			breakPCs[addr].isConditional = false;
+		}
+		// Already normal breakpoint, let's not make it temporary.
 	} else {
-		// nothing to do, just return the already-existing breakpoint index
-		return (int)bp;
+		// Remove the temporary marking.
+		breakPCsTemp.erase(addr);
+		breakPCs.emplace(addr, BreakpointInfo{});
 	}
+
+	breakPCsCount = breakPCs.size();
+	hasBreakpoints_ = true;
 }
 
-void BreakpointManager::RemoveBreakPoint(u32 addr) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		breakPoints_.erase(breakPoints_.begin() + bp);
-
-		UpdateAnyBreakPoints();
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-		System_Notify(SystemNotification::DISASSEMBLY);
+void GPUBreakpoints::AddCmdBreakpoint(u8 cmd, bool temp) {
+	// Debuggers call this from their own threads, racing ClearTempBreakpoints on the emu thread.
+	std::lock_guard<std::mutex> guard(breaksLock);
+	if (temp) {
+		if (!breakCmds[cmd]) {
+			breakCmdsTemp[cmd] = true;
+			breakCmds[cmd] = true;
+			breakCmdsInfo[cmd].isConditional = false;
+		}
+		// Ignore adding a temp breakpoint when a normal one exists.
+	} else {
+		// This is no longer temporary.
+		breakCmdsTemp[cmd] = false;
+		if (!breakCmds[cmd]) {
+			breakCmds[cmd] = true;
+			breakCmdsInfo[cmd].isConditional = false;
+		}
 	}
+	hasBreakpoints_ = true;
 }
 
-void BreakpointManager::SetTempBreakPoint(u32 addr) {
-	// Only one can be in flight - see TempBreakPoint. If there's an old one, it belonged to a step
-	// that never completed, so drop it (and its stale compiled-in check) rather than accumulating.
-	if (tempBreakPoint_.valid && tempBreakPoint_.addr != addr)
-		currentMIPS->InvalidateICacheRangeDeferred(tempBreakPoint_.addr - 4, 8);
+void GPUBreakpoints::AddTextureBreakpoint(u32 addr, bool temp) {
+	std::lock_guard<std::mutex> guard(breaksLock);
 
-	tempBreakPoint_ = TempBreakPoint{};
-	tempBreakPoint_.valid = true;
-	tempBreakPoint_.addr = addr;
+	if (temp) {
+		if (breakTextures.find(addr) == breakTextures.end()) {
+			breakTexturesTemp.insert(addr);
+			breakTextures.insert(addr);
+		}
+	} else {
+		breakTexturesTemp.erase(addr);
+		breakTextures.insert(addr);
+	}
 
-	UpdateAnyBreakPoints();
-	currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
+	breakTexturesCount = breakTextures.size();
+	hasBreakpoints_ = true;
 }
 
-void BreakpointManager::SetTempBreakPointCond(const BreakPointCond &cond) {
-	if (!tempBreakPoint_.valid)
-		return;
-	tempBreakPoint_.hasCond = true;
-	tempBreakPoint_.cond = cond;
+void GPUBreakpoints::AddRenderTargetBreakpoint(u32 addr, bool temp) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	addr &= 0x001FFFF0;
+
+	if (temp) {
+		if (breakRenderTargets.find(addr) == breakRenderTargets.end()) {
+			breakRenderTargetsTemp.insert(addr);
+			breakRenderTargets.insert(addr);
+		}
+	} else {
+		breakRenderTargetsTemp.erase(addr);
+		breakRenderTargets.insert(addr);
+	}
+
+	breakRenderTargetsCount = breakRenderTargets.size();
+	hasBreakpoints_ = true;
 }
 
-void BreakpointManager::ClearTempBreakPoint() {
-	if (!tempBreakPoint_.valid)
-		return;
-
-	const u32 addr = tempBreakPoint_.addr;
-	tempBreakPoint_ = TempBreakPoint{};
-
-	UpdateAnyBreakPoints();
-	currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
+void GPUBreakpoints::AddTextureChangeTempBreakpoint() {
+	std::lock_guard<std::mutex> guard(breaksLock);
+	textureChangeTemp = true;
+	hasBreakpoints_ = true;
 }
 
-void BreakpointManager::ChangeBreakPoint(u32 addr, bool status) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		if (status) {
-			breakPoints_[bp].action |= BREAK_ACTION_PAUSE;
+void GPUBreakpoints::AddAnyTempBreakpoint() {
+	for (int i = 0; i < 256; ++i) {
+		AddCmdBreakpoint(i, true);
+	}
+	hasBreakpoints_ = true;
+}
+
+void GPUBreakpoints::RemoveAddressBreakpoint(u32 addr) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	breakPCsTemp.erase(addr);
+	breakPCs.erase(addr);
+
+	breakPCsCount = breakPCs.size();
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+void GPUBreakpoints::RemoveCmdBreakpoint(u8 cmd) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	breakCmdsTemp[cmd] = false;
+	breakCmds[cmd] = false;
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+void GPUBreakpoints::RemoveTextureBreakpoint(u32 addr) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	breakTexturesTemp.erase(addr);
+	breakTextures.erase(addr);
+
+	breakTexturesCount = breakTextures.size();
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+void GPUBreakpoints::RemoveRenderTargetBreakpoint(u32 addr) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	addr &= 0x001FFFF0;
+
+	breakRenderTargetsTemp.erase(addr);
+	breakRenderTargets.erase(addr);
+
+	breakRenderTargetsCount = breakRenderTargets.size();
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+void GPUBreakpoints::RemoveTextureChangeTempBreakpoint() {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	textureChangeTemp = false;
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+static bool SetupCond(GPUBreakpoints::BreakpointInfo &bp, const std::string &expression, std::string *error) {
+	bool success = true;
+	if (expression.length() != 0) {
+		if (GPUDebugInitExpression(gpu, expression.c_str(), bp.expression)) {
+			bp.isConditional = true;
+			bp.expressionString = expression;
 		} else {
-			breakPoints_[bp].action = BreakAction(breakPoints_[bp].action & ~BREAK_ACTION_PAUSE);
+			// Don't change if it failed.
+			if (error)
+				*error = getExpressionError();
+			success = false;
 		}
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-		System_Notify(SystemNotification::DISASSEMBLY);
-	}
-}
-
-void BreakpointManager::ChangeBreakPoint(u32 addr, BreakAction action) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		breakPoints_[bp].action = action;
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-		System_Notify(SystemNotification::DISASSEMBLY);
-	}
-}
-
-// Relocates a breakpoint the user already set, rather than making them delete and re-add it.
-// Returns false and changes nothing if there's no breakpoint at oldAddr, or if newAddr already has
-// one of its own.
-//
-// Refusing the duplicate matters: ExecBreakPoint() goes through FindBreakpoint(), which returns
-// only one entry per address, so a second breakpoint at the same address would be invisible.
-bool BreakpointManager::ChangeBreakPointAddress(u32 oldAddr, u32 newAddr) {
-	if (oldAddr == newAddr)
-		return true;
-
-	size_t bp = FindBreakpoint(oldAddr);
-	if (bp == INVALID_BREAKPOINT)
-		return false;
-	if (FindBreakpoint(newAddr) != INVALID_BREAKPOINT)
-		return false;
-
-	if (newAddr & 3) {
-		WARN_LOG(Log::Debugger, "Breakpoint moved to %08x will not be effective - unaligned address.", newAddr);
-	}
-
-	breakPoints_[bp].addr = newAddr;
-	// The count belonged to the old address, so carrying it over would just be misleading.
-	breakPoints_[bp].numHits = 0;
-
-	// Both ends need invalidating, not just the new one: under a JIT the old address still has a
-	// compiled-in check that now matches no breakpoint, and the new address has none at all.
-	currentMIPS->InvalidateICacheRangeDeferred(oldAddr - 4, 8);
-	currentMIPS->InvalidateICacheRangeDeferred(newAddr - 4, 8);
-	System_Notify(SystemNotification::DISASSEMBLY);
-	return true;
-}
-
-// This is not actually called, currently.
-void BreakpointManager::ClearAllBreakPoints() {
-	if (!anyBreakPoints_)
-		return;
-	if (!breakPoints_.empty()) {
-		for (const auto &bp : breakPoints_) {
-			currentMIPS->InvalidateICacheRangeDeferred(bp.addr - 4, 8);
-		}
-		breakPoints_.clear();
-	}
-	// Note: leaves the temporary breakpoint alone - it belongs to an in-flight step, not the user.
-	UpdateAnyBreakPoints();
-}
-
-void BreakpointManager::ChangeBreakPointAddCond(u32 addr, const BreakPointCond &cond)
-{
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT)
-	{
-		breakPoints_[bp].hasCond = true;
-		breakPoints_[bp].cond = cond;
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-	}
-}
-
-void BreakpointManager::ChangeBreakPointRemoveCond(u32 addr) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		breakPoints_[bp].hasCond = false;
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-	}
-}
-
-BreakPointCond *BreakpointManager::GetBreakPointCondition(u32 addr) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT && breakPoints_[bp].hasCond)
-		return &breakPoints_[bp].cond;
-	return nullptr;
-}
-
-void BreakpointManager::ChangeBreakPointLogFormat(u32 addr, const std::string &fmt) {
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		breakPoints_[bp].logFormat = fmt;
-		currentMIPS->InvalidateICacheRangeDeferred(addr - 4, 8);
-	}
-}
-
-// Note that the user's breakpoint and the internal temporary one are handled independently, and the
-// actions combine - a log-only breakpoint at the address a step-over is heading for must still log,
-// and must still let the step complete. Whichever of them pauses, Core_Break() drops the temporary
-// breakpoint, so a step that gets interrupted by something else doesn't leave one armed behind it.
-BreakAction BreakpointManager::ExecBreakPoint(u32 addr) {
-	if (!anyBreakPoints_)
-		return BREAK_ACTION_NONE;
-
-	BreakAction result = BREAK_ACTION_NONE;
-	BreakpointHit hit;
-
-	size_t bp = FindBreakpoint(addr);
-	if (bp != INVALID_BREAKPOINT) {
-		BreakPoint &info = breakPoints_[bp];
-		const BreakAction action = info.action;
-
-		bool condPassed = true;
-		if (info.hasCond)
-			condPassed = info.cond.Evaluate() != 0;
-
-		if (condPassed) {
-			++info.numHits;
-
-			if (action != BREAK_ACTION_NONE && (WebSocketDebuggerHasClients() || (action & BREAK_ACTION_PAUSE))) {
-				hit.kind = BreakpointKind::Exec;
-				hit.pc = addr;
-				hit.address = addr;
-				hit.rangeStart = addr;
-				hit.rangeEnd = addr;
-				hit.numHits = info.numHits;
-				hit.logged = (action & BREAK_ACTION_LOG) != 0;
-				hit.paused = (action & BREAK_ACTION_PAUSE) != 0;
-				if (info.hasCond)
-					hit.condition = info.cond.expressionString;
-				WebSocketNotifyBreakpointHit(hit);
-			}
-
-			if (action & BREAK_ACTION_LOG) {
-				// Empty unless the game shipped an unstripped ELF - see Core/Debugger/LineInfo.h.
-				// Worth the lookup even on this path: a log-only breakpoint's whole output is these
-				// lines, and "mesh.zig:163" beats an address for reading a few thousand of them.
-				const std::string source = g_lineInfo.LookupString(addr);
-				const std::string at = source.empty() ? std::string() : " " + source;
-				if (info.logFormat.empty()) {
-					NOTICE_LOG(Log::JIT, "BKP PC=%08x%s (%s)", addr, at.c_str(), g_symbolMap->GetDescription(addr).c_str());
-				} else {
-					std::string formatted;
-					BreakpointManager::EvaluateLogFormat(currentDebugMIPS, info.logFormat, formatted);
-					NOTICE_LOG(Log::JIT, "BKP PC=%08x%s: %s", addr, at.c_str(), formatted.c_str());
-				}
-			}
-
-			result |= action;
-		}
-	}
-
-	if (tempBreakPoint_.valid && tempBreakPoint_.addr == addr) {
-		// The condition, when set, narrows down which hit counts - to one thread for a step
-		// ("threadid == ..."), or to a later frame for run-to-cursor ("flipcount > ...").  A hit that
-		// fails it leaves the breakpoint armed, so the next one gets a chance.
-		if (!tempBreakPoint_.hasCond || tempBreakPoint_.cond.Evaluate() != 0) {
-			DEBUG_LOG(Log::Debugger, "Reached temporary breakpoint at %08x", addr);
-			result |= BREAK_ACTION_PAUSE;
-		}
-	}
-
-	if (result & BREAK_ACTION_PAUSE) {
-		// hit stays kind None when only the temporary breakpoint fired - there's no user
-		// breakpoint to describe in that case, just a step completing.
-		Core_Break(BreakReason::CpuBreakpoint, addr, hit.kind != BreakpointKind::None ? &hit : nullptr);
-		System_Notify(SystemNotification::DISASSEMBLY);
-	}
-
-	return result;
-}
-
-int BreakpointManager::AddMemCheck(u32 start, u32 end, MemCheckCondition cond, BreakAction action) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc == INVALID_MEMCHECK) {
-		MemCheck check;
-		check.start = start;
-		check.end = end;
-		check.cond = cond;
-		check.action = action;
-
-		memChecks_.push_back(check);
-		bool hadAny = anyMemChecks_.exchange(true);
-		if (!hadAny) {
-			MemBlockOverrideDetailed();
-		}
-		updateMemChecks_ = true;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-		return (int)memChecks_.size() - 1;
 	} else {
-		// Update with additional cond and action bits. Not sure if we should OR or override?
-		memChecks_[mc].cond = (MemCheckCondition)(memChecks_[mc].cond | cond);
-		memChecks_[mc].action = memChecks_[mc].action | action;
-		bool hadAny = anyMemChecks_.exchange(true);
-		if (!hadAny) {
-			MemBlockOverrideDetailed();
-		}
-		updateMemChecks_ = true;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-		return (int)mc;
+		bp.isConditional = false;
 	}
+	return success;
 }
 
-void BreakpointManager::RemoveMemCheck(u32 start, u32 end)
-{
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK)
-	{
-		memChecks_.erase(memChecks_.begin() + mc);
-		bool hadAny = anyMemChecks_.exchange(!memChecks_.empty());
-		if (hadAny)
-			MemBlockReleaseDetailed();
-		updateMemChecks_ = true;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-	}
+bool GPUBreakpoints::SetAddressBreakpointCond(u32 addr, const std::string &expression, std::string *error) {
+	// Must have one in the first place, make sure it's not temporary.
+	AddAddressBreakpoint(addr);
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	auto &bp = breakPCs[addr];
+	return SetupCond(breakPCs[addr], expression, error);
 }
 
-void BreakpointManager::ChangeMemCheck(u32 start, u32 end, MemCheckCondition cond, BreakAction action)
-{
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK)
-	{
-		memChecks_[mc].cond = cond;
-		memChecks_[mc].action = action;
-		updateMemChecks_ = true;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-	}
-}
-
-void BreakpointManager::ClearAllMemChecks()
-{
-	if (!memChecks_.empty())
-	{
-		memChecks_.clear();
-		bool hadAny = anyMemChecks_.exchange(false);
-		if (hadAny)
-			MemBlockReleaseDetailed();
-		updateMemChecks_ = true;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-	}
-}
-
-void BreakpointManager::ChangeMemCheckAddCond(u32 start, u32 end, const BreakPointCond &cond) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK) {
-		memChecks_[mc].hasCondition = true;
-		memChecks_[mc].condition = cond;
-		// No need to update jit for a condition add/remove, they're not baked in.
-	}
-}
-
-void BreakpointManager::ChangeMemCheckRemoveCond(u32 start, u32 end) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK) {
-		memChecks_[mc].hasCondition = false;
-		// No need to update jit for a condition add/remove, they're not baked in.
-	}
-}
-
-BreakPointCond *BreakpointManager::GetMemCheckCondition(u32 start, u32 end) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK && memChecks_[mc].hasCondition)
-		return &memChecks_[mc].condition;
-	return nullptr;
-}
-
-void BreakpointManager::ChangeMemCheckLogFormat(u32 start, u32 end, const std::string &fmt) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK) {
-		memChecks_[mc].logFormat = fmt;
-		currentMIPS->ClearJitCacheDeferred();  // memchecks apply to all memory accesses
-	}
-}
-
-bool BreakpointManager::GetMemCheck(u32 start, u32 end, MemCheck *check) {
-	size_t mc = FindMemCheck(start, end);
-	if (mc != INVALID_MEMCHECK) {
-		*check = memChecks_[mc];
+bool GPUBreakpoints::GetAddressBreakpointCond(u32 addr, std::string *expression) {
+	std::lock_guard<std::mutex> guard(breaksLock);
+	auto entry = breakPCs.find(addr);
+	if (entry != breakPCs.end() && entry->second.isConditional) {
+		if (expression)
+			*expression = entry->second.expressionString;
 		return true;
 	}
 	return false;
 }
 
-static inline u32 NotCached(u32 val) {
-	// Remove the cached part of the address as well as any mirror. Also ignores the kernel
-	// bit (0x80000000) - not just the uncached bit (0x40000000) - so a memcheck registered
-	// via one alias (e.g. user-space cached) still matches an access made through another
-	// (e.g. kernel-space uncached). VRAM has no kernel-flagged mirror (see IsValidAddress),
-	// so that case only needs the uncached bit masked.
-	if ((val & 0x3F800000) == 0x04000000)
-		return val & ~0x40600000;
-	return val & ~0xC0000000;
+bool GPUBreakpoints::SetCmdBreakpointCond(u8 cmd, const std::string &expression, std::string *error) {
+	// Must have one in the first place, make sure it's not temporary.
+	AddCmdBreakpoint(cmd);
+
+	std::lock_guard<std::mutex> guard(breaksLock);
+	return SetupCond(breakCmdsInfo[cmd], expression, error);
 }
 
-bool BreakpointManager::GetMemCheckInRange(u32 address, int size, MemCheck *check) {
-	auto result = FindMemCheckInRange(address, size);
-	if (result)
-		*check = *result;
-	return result != nullptr;
-}
-
-MemCheck *BreakpointManager::FindMemCheckInRange(u32 address, int size) {
-	std::vector<MemCheck>::iterator iter;
-	for (MemCheck &check : memChecks_) {
-		if (check.end != 0) {
-			if (NotCached(address + size) > NotCached(check.start) && NotCached(address) < NotCached(check.end))
-				return &check;
-		} else {
-			if (NotCached(check.start) == NotCached(address))
-				return &check;
+bool GPUBreakpoints::GetCmdBreakpointCond(u8 cmd, std::string *expression) {
+	if (breakCmds[cmd] && breakCmdsInfo[cmd].isConditional) {
+		if (expression) {
+			std::lock_guard<std::mutex> guard(breaksLock);
+			*expression = breakCmdsInfo[cmd].expressionString;
 		}
-	}
-
-	// none found
-	return 0;
-}
-
-BreakAction BreakpointManager::ExecMemCheck(u32 address, bool write, int size, u32 pc, const char *reason)
-{
-	if (!anyMemChecks_)
-		return BREAK_ACTION_NONE;
-	MemCheck *check = FindMemCheckInRange(address, size);
-	if (check) {
-		BreakAction applyAction = check->Apply(address, write, size, pc);
-		if (applyAction == BREAK_ACTION_NONE)
-			return applyAction;
-
-		MemCheck copy = *check;
-		return copy.Action(address, write, size, pc, reason);
-	}
-	return BREAK_ACTION_NONE;
-}
-
-BreakAction BreakpointManager::ExecOpMemCheck(u32 address, u32 pc) {
-	// Note: currently, we don't check "on changed" for HLE (ExecMemCheck.)
-	// We'd need to more carefully specify memory changes in HLE for that.
-	int size = MIPSAnalyst::OpMemoryAccessSize(pc);
-	if (size == 0 && MIPSAnalyst::OpHasDelaySlot(pc)) {
-		// This means that the delay slot is what tripped us.
-		pc += 4;
-		size = MIPSAnalyst::OpMemoryAccessSize(pc);
-	}
-
-	bool write = MIPSAnalyst::IsOpMemoryWrite(pc);
-	MemCheck *check = FindMemCheckInRange(address, size);
-	if (check) {
-		int mask = MEMCHECK_WRITE | MEMCHECK_WRITE_ONCHANGE;
-		bool apply = false;
-		if (write && (check->cond & mask) == mask) {
-			if (MIPSAnalyst::OpWouldChangeMemory(currentMIPS, pc, address, size)) {
-				apply = true;
-			}
-		} else {
-			apply = true;
-		}
-		if (apply) {
-			BreakAction applyAction = check->Apply(address, write, size, pc);
-			if (applyAction == BREAK_ACTION_NONE)
-				return applyAction;
-
-			MemCheck copy = *check;
-			return copy.Action(address, write, size, pc, "CPU");
-		}
-	}
-	return BREAK_ACTION_NONE;
-}
-
-void BreakpointManager::RecomputeRegBreakpointMask() {
-	u32 mask = 0;
-	for (const auto &bp : regBreakpoints_) {
-		if (bp.result != BREAK_ACTION_NONE)
-			mask |= 1u << bp.reg;
-	}
-	regBreakpointMask_ = mask;
-}
-
-int BreakpointManager::AddRegBreakpoint(int reg) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp == INVALID_REG_BREAKPOINT) {
-		RegBreakpoint pt;
-		pt.reg = reg;
-		pt.result |= BREAK_ACTION_PAUSE;
-
-		regBreakpoints_.push_back(pt);
-		RecomputeRegBreakpointMask();
-		return (int)regBreakpoints_.size() - 1;
-	} else if (!regBreakpoints_[bp].IsEnabled()) {
-		regBreakpoints_[bp].result |= BREAK_ACTION_PAUSE;
-		regBreakpoints_[bp].hasCond = false;
-		RecomputeRegBreakpointMask();
-		return (int)bp;
-	} else {
-		return (int)bp;
-	}
-}
-
-void BreakpointManager::RemoveRegBreakpoint(int reg) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		regBreakpoints_.erase(regBreakpoints_.begin() + bp);
-		RecomputeRegBreakpointMask();
-	}
-}
-
-void BreakpointManager::ChangeRegBreakpoint(int reg, bool status) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		if (status)
-			regBreakpoints_[bp].result |= BREAK_ACTION_PAUSE;
-		else
-			regBreakpoints_[bp].result = BreakAction(regBreakpoints_[bp].result & ~BREAK_ACTION_PAUSE);
-		RecomputeRegBreakpointMask();
-	}
-}
-
-void BreakpointManager::ChangeRegBreakpoint(int reg, BreakAction result) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		regBreakpoints_[bp].result = result;
-		RecomputeRegBreakpointMask();
-	}
-}
-
-void BreakpointManager::ClearAllRegBreakpoints() {
-	if (!regBreakpoints_.empty()) {
-		regBreakpoints_.clear();
-		regBreakpointMask_ = 0;
-	}
-}
-
-void BreakpointManager::ChangeRegBreakpointAddCond(int reg, const BreakPointCond &cond) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		regBreakpoints_[bp].hasCond = true;
-		regBreakpoints_[bp].cond = cond;
-	}
-}
-
-void BreakpointManager::ChangeRegBreakpointRemoveCond(int reg) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		regBreakpoints_[bp].hasCond = false;
-	}
-}
-
-BreakPointCond *BreakpointManager::GetRegBreakpointCondition(int reg) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT && regBreakpoints_[bp].hasCond)
-		return &regBreakpoints_[bp].cond;
-	return nullptr;
-}
-
-void BreakpointManager::ChangeRegBreakpointLogFormat(int reg, const std::string &fmt) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		regBreakpoints_[bp].logFormat = fmt;
-	}
-}
-
-bool BreakpointManager::IsRegBreakpoint(int reg) {
-	return (regBreakpointMask_ & (1u << reg)) != 0;
-}
-
-bool BreakpointManager::GetRegBreakpoint(int reg, RegBreakpoint *check) {
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp != INVALID_REG_BREAKPOINT) {
-		*check = regBreakpoints_[bp];
 		return true;
 	}
 	return false;
 }
 
-std::vector<RegBreakpoint> BreakpointManager::GetRegBreakpoints() {
-	return regBreakpoints_;
+void GPUBreakpoints::UpdateLastTexture(u32 addr) {
+	lastTexture = addr;
 }
 
-BreakAction BreakpointManager::ExecRegBreakpoint(int reg, u32 pc) {
-	// Callers are expected to have already checked GetRegBreakpointMask() themselves (that's
-	// the whole point of exposing it - a single shift+and in the hot interpreter loop, skipping
-	// a function call entirely in the overwhelmingly common no-breakpoint case), but check again
-	// here too since this is also reachable directly.
-	if ((regBreakpointMask_ & (1u << reg)) == 0)
-		return BREAK_ACTION_NONE;
-	size_t bp = FindRegBreakpoint(reg);
-	if (bp == INVALID_REG_BREAKPOINT)
-		return BREAK_ACTION_NONE;
+void GPUBreakpoints::ClearAllBreakpoints() {
+	std::lock_guard<std::mutex> guard(breaksLock);
 
-	RegBreakpoint &info = regBreakpoints_[bp];
-	if (info.result == BREAK_ACTION_NONE)
-		return BREAK_ACTION_NONE;
-
-	if (info.hasCond && !info.cond.Evaluate())
-		return BREAK_ACTION_NONE;
-
-	++info.numHits;
-
-	BreakpointHit hit;
-	if (WebSocketDebuggerHasClients() || (info.result & BREAK_ACTION_PAUSE)) {
-		hit.kind = BreakpointKind::Register;
-		hit.pc = pc;
-		hit.address = pc;
-		hit.reg = reg;
-		hit.numHits = info.numHits;
-		hit.logged = (info.result & BREAK_ACTION_LOG) != 0;
-		hit.paused = (info.result & BREAK_ACTION_PAUSE) != 0;
-		if (info.hasCond)
-			hit.condition = info.cond.expressionString;
-		WebSocketNotifyBreakpointHit(hit);
+	for (int i = 0; i < 256; ++i) {
+		breakCmds[i] = false;
+		breakCmdsTemp[i] = false;
 	}
+	breakPCs.clear();
+	breakTextures.clear();
+	breakRenderTargets.clear();
 
-	if (info.result & BREAK_ACTION_LOG) {
-		if (info.logFormat.empty()) {
-			NOTICE_LOG(Log::JIT, "BKP reg write r%d, PC=%08x (%s)", reg, pc, g_symbolMap->GetDescription(pc).c_str());
-		} else {
-			std::string formatted;
-			BreakpointManager::EvaluateLogFormat(currentDebugMIPS, info.logFormat, formatted);
-			NOTICE_LOG(Log::JIT, "BKP reg write r%d, PC=%08x: %s", reg, pc, formatted.c_str());
+	breakPCsTemp.clear();
+	breakTexturesTemp.clear();
+	breakRenderTargetsTemp.clear();
+
+	breakPCsCount = breakPCs.size();
+	breakTexturesCount = breakTextures.size();
+	breakRenderTargetsCount = breakRenderTargets.size();
+
+	textureChangeTemp = false;
+	hasBreakpoints_ = false;
+}
+
+void GPUBreakpoints::ClearTempBreakpoints() {
+	std::lock_guard<std::mutex> guard(breaksLock);
+
+	// Reset ones that were temporary back to non-breakpoints in the primary arrays.
+	for (int i = 0; i < 256; ++i) {
+		if (breakCmdsTemp[i]) {
+			breakCmds[i] = false;
+			breakCmdsTemp[i] = false;
 		}
 	}
-	if ((info.result & BREAK_ACTION_PAUSE) && g_breakpoints.CheckSkipFirst() != pc) {
-		Core_Break(BreakReason::RegBreakpoint, pc, &hit);
+
+	for (auto it = breakPCsTemp.begin(), end = breakPCsTemp.end(); it != end; ++it) {
+		breakPCs.erase(*it);
+	}
+	breakPCsTemp.clear();
+	breakPCsCount = breakPCs.size();
+
+	for (auto it = breakTexturesTemp.begin(), end = breakTexturesTemp.end(); it != end; ++it) {
+		breakTextures.erase(*it);
+	}
+	breakTexturesTemp.clear();
+	breakTexturesCount = breakTextures.size();
+
+	for (auto it = breakRenderTargetsTemp.begin(), end = breakRenderTargetsTemp.end(); it != end; ++it) {
+		breakRenderTargets.erase(*it);
+	}
+	breakRenderTargetsTemp.clear();
+	breakRenderTargetsCount = breakRenderTargets.size();
+
+	textureChangeTemp = false;
+	hasBreakpoints_ = HasAnyBreakpoints();
+}
+
+bool GPUBreakpoints::ToggleCmdBreakpoint(const GECmdInfo &info) {
+	if (IsCmdBreakpoint(info.cmd)) {
+		RemoveCmdBreakpoint(info.cmd);
+		if (info.otherCmd)
+			RemoveCmdBreakpoint(info.otherCmd);
+		if (info.otherCmd2)
+			RemoveCmdBreakpoint(info.otherCmd2);
+		return false;
 	}
 
-	return info.result;
-}
-
-void BreakpointManager::ClearSkipFirst() {
-	breakSkipFirstAt_ = 0;
-	breakSkipFirstTicks_ = 0;
-}
-
-void BreakpointManager::SetSkipFirst(u32 pc) {
-	breakSkipFirstAt_ = pc;
-	breakSkipFirstTicks_ = CoreTiming::GetTicks(currentMIPS);
-}
-
-u32 BreakpointManager::CheckSkipFirst() const {
-	u32 pc = breakSkipFirstAt_;
-	if (breakSkipFirstTicks_ == CoreTiming::GetTicks(currentMIPS))
-		return pc;
-	return 0;
-}
-
-static MemCheck NotCached(MemCheck mc) {
-	// Toggle the uncached bit (0x40000000) of the address.
-	mc.start ^= 0x40000000;
-	if (mc.end != 0)
-		mc.end ^= 0x40000000;
-	return mc;
-}
-
-static MemCheck NotKernel(MemCheck mc) {
-	// Toggle the kernel bit (0x80000000) of the address - independent of, and combinable
-	// with, the uncached bit above. Not applied to VRAM ranges: VRAM has no kernel-flagged
-	// mirror (see IsValidAddress's "disallow kernel-flagged VRAM" comment).
-	mc.start ^= 0x80000000;
-	if (mc.end != 0)
-		mc.end ^= 0x80000000;
-	return mc;
-}
-
-static MemCheck VRAMMirror(uint8_t mirror, MemCheck mc) {
-	mc.start &= ~0x00600000;
-	mc.start += 0x00200000 * mirror;
-	if (mc.end != 0) {
-		mc.end &= ~0x00600000;
-		mc.end += 0x00200000 * mirror;
-		if (mc.end < mc.start)
-			mc.end += 0x00200000;
-	}
-	return mc;
-}
-
-void BreakpointManager::UpdateCachedMemCheckRanges() {
-	memCheckRangesRead_.clear();
-	memCheckRangesWrite_.clear();
-
-	auto add = [&](bool read, bool write, const MemCheck &mc) {
-		if (read)
-			memCheckRangesRead_.push_back(mc);
-		if (write)
-			memCheckRangesWrite_.push_back(mc);
-	};
-
-	for (const auto &check : memChecks_) {
-		bool read = (check.cond & MEMCHECK_READ) != 0;
-		bool write = (check.cond & MEMCHECK_WRITE) != 0;
-
-		if (Memory::IsVRAMAddress(check.start) && (check.end == 0 || Memory::IsVRAMAddress(check.end))) {
-			for (uint8_t mirror = 0; mirror < 4; ++mirror) {
-				MemCheck copy = VRAMMirror(mirror, check);
-				add(read, write, copy);
-				add(read, write, NotCached(copy));
-			}
-		} else {
-			// All four combinations of the independent uncached (0x40000000) and kernel
-			// (0x80000000) address bits - see NotCached(u32)/NotKernel() above.
-			add(read, write, check);
-			add(read, write, NotCached(check));
-			add(read, write, NotKernel(check));
-			add(read, write, NotKernel(NotCached(check)));
-		}
-	}
-}
-
-std::vector<MemCheck> BreakpointManager::GetMemCheckRanges(bool write) {
-	if (write)
-		return memCheckRangesWrite_;
-	return memCheckRangesRead_;
-}
-
-std::vector<MemCheck> BreakpointManager::GetMemChecks() {
-	return memChecks_;
-}
-
-std::vector<BreakPoint> BreakpointManager::GetBreakpoints() {
-	return breakPoints_;
-}
-
-void BreakpointManager::Frame() {
-	if (anyMemChecks_ && updateMemChecks_) {
-		UpdateCachedMemCheckRanges();
-		updateMemChecks_ = false;
-	}
-}
-
-bool BreakpointManager::ValidateLogFormat(MIPSDebugInterface *cpu, const std::string &fmt) {
-	std::string ignore;
-	return EvaluateLogFormat(cpu, fmt, ignore);
-}
-
-bool BreakpointManager::EvaluateLogFormat(MIPSDebugInterface *cpu, const std::string &fmt, std::string &result) {
-	PostfixExpression exp;
-	result.clear();
-
-	size_t pos = 0;
-	while (pos < fmt.size()) {
-		size_t next = fmt.find_first_of('{', pos);
-		if (next == fmt.npos) {
-			// End of the string.
-			result += fmt.substr(pos);
-			break;
-		}
-		if (next != pos) {
-			result += fmt.substr(pos, next - pos);
-			pos = next;
-		}
-
-		size_t end = fmt.find_first_of('}', next + 1);
-		if (end == fmt.npos) {
-			// Invalid: every expression needs a { and a }.
-			return false;
-		}
-
-		std::string expression = fmt.substr(next + 1, end - next - 1);
-		if (expression.empty()) {
-			result += "{}";
-		} else {
-			int type = 'x';
-			if (expression.length() > 2 && expression[expression.length() - 2] == ':') {
-				switch (expression[expression.length() - 1]) {
-				case 'd':
-				case 'f':
-				case 'p':
-				case 's':
-				case 'x':
-					type = expression[expression.length() - 1];
-					expression.resize(expression.length() - 2);
-					break;
-
-				default:
-					// Assume a ternary.
-					break;
-				}
-			}
-
-			if (!initExpression(cpu, expression.c_str(), exp)) {
-				return false;
-			}
-
-			union {
-				int i;
-				u32 u;
-				float f;
-			} expResult;
-			char resultString[256];
-			if (!parseExpression(cpu, exp, expResult.u)) {
-				return false;
-			}
-
-			switch (type) {
-			case 'd':
-				snprintf(resultString, sizeof(resultString), "%d", expResult.i);
-				break;
-			case 'f':
-				snprintf(resultString, sizeof(resultString), "%f", expResult.f);
-				break;
-			case 'p':
-				if (Memory::IsValidAddress(expResult.u)) {
-					snprintf(resultString, sizeof(resultString), "%08x[%08x]", expResult.u, Memory::ReadUnchecked_U32(expResult.u));
-				} else {
-					snprintf(resultString, sizeof(resultString), "%08x[invalid]", expResult.u);
-				}
-				break;
-			case 's':
-				snprintf(resultString, sizeof(resultString) - 1, "%s", Memory::IsValidAddress(expResult.u) ? Memory::GetCharPointer(expResult.u) : "(invalid)");
-				break;
-			case 'x':
-				snprintf(resultString, sizeof(resultString), "%08x", expResult.u);
-				break;
-			}
-			result += resultString;
-		}
-
-		// Skip the }.
-		pos = end + 1;
-	}
-
+	AddCmdBreakpoint(info.cmd);
+	if (info.otherCmd)
+		AddCmdBreakpoint(info.otherCmd);
+	if (info.otherCmd2)
+		AddCmdBreakpoint(info.otherCmd2);
 	return true;
 }
+
