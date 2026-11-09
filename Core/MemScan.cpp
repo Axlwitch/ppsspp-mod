@@ -12,6 +12,8 @@
 #include "Core/Debugger/DisassemblyManager.h"
 #include <map>
 #include <atomic>
+#include <cstdio>
+#include <unordered_set>
 
 static const uint32_t SCAN_START = 0x08800000;  // awal RAM user (8 MB pertama = kernel)
 // Akhir RAM mengikuti ukuran RAM yang aktif: PSP-1000 = 32 MB -> 0x0A000000 (user 24 MB),
@@ -72,6 +74,18 @@ static bool Matches(ScanType t, ScanCmp cmp, uint32_t cur, uint32_t prev, uint32
 		return t == ScanType::Float ? AsFloat(cur) > AsFloat(prev) : cur > prev;
 	case ScanCmp::Less:
 		return t == ScanType::Float ? AsFloat(cur) < AsFloat(prev) : cur < prev;
+	case ScanCmp::IncBy:
+	case ScanCmp::DecBy: {
+		const bool inc = cmp == ScanCmp::IncBy;
+		if (t == ScanType::Float) {
+			float e = inc ? AsFloat(prev) + AsFloat(target) : AsFloat(prev) - AsFloat(target);
+			uint32_t bits;
+			memcpy(&bits, &e, 4);
+			return FloatNear(cur, bits);
+		}
+		const uint32_t mask = t == ScanType::U8 ? 0xFFu : (t == ScanType::U16 ? 0xFFFFu : 0xFFFFFFFFu);
+		return cur == (((inc ? prev + target : prev - target)) & mask);
+	}
 	}
 	return false;
 }
@@ -82,6 +96,70 @@ void MemScanner::Reset() {
 	truncated_ = false;
 	wide_ = false;
 	hasScan_ = false;
+	unknown_ = false;
+	unknownCount_ = 0;
+	snap_.clear();
+	snap_.shrink_to_fit();
+	alive_.clear();
+	alive_.shrink_to_fit();
+}
+
+void MemScanner::FirstUnknown(ScanType type) {
+	Reset();
+	type_ = type;
+	const uint32_t start = SCAN_START, end = ScanEnd();
+	if (end <= start || !Memory::IsActive() || !Memory::IsValidRange(start, end - start))
+		return;
+	const int size = SizeOf(type);
+	const uint32_t len = end - start;
+	snap_.resize(len);
+	memcpy(snap_.data(), Memory::GetPointerUnchecked(start), len);
+	alive_.assign(len / size, 1);
+	unknownCount_ = len / size;
+	unknown_ = true;
+	hasScan_ = true;
+}
+
+void MemScanner::NextUnknown(ScanCmp cmp, uint32_t rawValue) {
+	const uint32_t start = SCAN_START, end = ScanEnd(), len = end - start;
+	if (snap_.size() != len || !Memory::IsActive() || !Memory::IsValidRange(start, len))
+		return;
+	const uint8_t *ram = Memory::GetPointerUnchecked(start);
+	const int size = SizeOf(type_);
+	uint32_t count = 0;
+	for (uint32_t i = 0; i < (uint32_t)alive_.size(); i++) {
+		if (!alive_[i])
+			continue;
+		const uint32_t off = i * (uint32_t)size;
+		uint32_t cur = 0, prev = 0;
+		memcpy(&cur, ram + off, size);  // host little-endian, sama dengan Memory::ReadUnchecked
+		memcpy(&prev, snap_.data() + off, size);
+		if (Matches(type_, cmp, cur, prev, rawValue)) {
+			count++;
+			memcpy(snap_.data() + off, &cur, size);  // pembanding berikutnya = nilai terbaru
+		} else {
+			alive_[i] = 0;
+		}
+	}
+	unknownCount_ = count;
+	if (count <= MAX_HITS) {
+		// Sudah cukup sedikit: ubah jadi daftar hasil biasa.
+		hits_.clear();
+		hits_.reserve(count);
+		for (uint32_t i = 0; i < (uint32_t)alive_.size(); i++) {
+			if (!alive_[i])
+				continue;
+			const uint32_t off = i * (uint32_t)size;
+			uint32_t cur = 0;
+			memcpy(&cur, ram + off, size);
+			hits_.push_back({ start + off, cur, size, HitKind::Value, nullptr });
+		}
+		unknown_ = false;
+		snap_.clear();
+		snap_.shrink_to_fit();
+		alive_.clear();
+		alive_.shrink_to_fit();
+	}
 }
 
 void MemScanner::First(ScanType type, uint32_t rawValue) {
@@ -109,6 +187,10 @@ void MemScanner::First(ScanType type, uint32_t rawValue) {
 void MemScanner::Next(ScanCmp cmp, uint32_t rawValue) {
 	if (!hasScan_ || wide_)
 		return;
+	if (unknown_) {
+		NextUnknown(cmp, rawValue);
+		return;
+	}
 	std::vector<ScanHit> kept;
 	kept.reserve(hits_.size());
 	for (ScanHit h : hits_) {
@@ -252,6 +334,7 @@ bool MemFreezer::Get(int idx, FreezeEntry *out) {
 }
 
 void MemFreezer::Apply() {
+	MemPatcher::Apply();  // patch instruksi aktif ikut dijaga di sini
 	std::lock_guard<std::mutex> guard(g_freezeLock);
 	if (g_freezes.empty() || !Memory::IsActive())
 		return;
@@ -356,6 +439,7 @@ int MemFreezer::RelocateAll() {
 static std::mutex g_watchLock;
 static std::atomic<bool> g_watchActive{ false };
 static uint32_t g_watchStart = 0, g_watchEnd = 0;
+static std::atomic<uint32_t> g_rawCalls{ 0 }, g_matchCalls{ 0 };
 static std::map<uint64_t, AccessRecord> g_records;  // kunci: (pc << 1) | write
 static const size_t MAX_RECORDS = 2000;
 
@@ -368,11 +452,14 @@ bool MemWatch::Start(uint32_t addr, int size) {
 		g_watchStart = addr;
 		g_watchEnd = addr + size;
 		g_records.clear();
+		g_rawCalls = 0;
+		g_matchCalls = 0;
 		g_watchActive = true;
 	}
 	// BREAK_ACTION_NONE: tidak pause dan tidak menulis log; kita hanya butuh hook di MemCheck::Apply.
 	// (Jika log kosong padahal alamat jelas diakses, coba ganti ke BREAK_ACTION_LOG.)
 	g_breakpoints.AddMemCheck(g_watchStart, g_watchEnd, MEMCHECK_READWRITE, BREAK_ACTION_NONE);
+	g_breakpoints.Frame();  // segarkan cache rentang memcheck sekarang, jangan menunggu frame berikutnya
 	return true;
 }
 
@@ -417,9 +504,11 @@ const char *MemWatch::RegName(int r) {
 void MemWatch::Record(uint32_t start, uint32_t end, uint32_t addr, bool write, int size, uint32_t pc) {
 	if (!g_watchActive)
 		return;
+	g_rawCalls++;
 	std::lock_guard<std::mutex> guard(g_watchLock);
 	if (start != g_watchStart || end != g_watchEnd)
 		return;  // memcheck milik orang lain (debugger), bukan pantauan kita
+	g_matchCalls++;
 
 	// Cari instruksi yang benar-benar mengakses (sama dengan ExecOpMemCheck: kasus delay slot).
 	uint32_t ipc = pc;
@@ -480,4 +569,247 @@ std::vector<AccessRecord> MemWatch::Snapshot() {
 		return a.count > b.count;
 	});
 	return out;
+}
+
+std::string MemWatch::DebugInfo() {
+	uint32_t s, e;
+	{
+		std::lock_guard<std::mutex> guard(g_watchLock);
+		s = g_watchStart;
+		e = g_watchEnd;
+	}
+	bool found = false;
+	uint32_t numHits = 0;
+	if (g_watchActive) {
+		for (const MemCheck &m : g_breakpoints.GetMemChecks()) {
+			if (m.start == s && m.end == e) {
+				found = true;
+				numHits = (uint32_t)m.numHits;
+			}
+		}
+	}
+	char buf[220];
+	snprintf(buf, sizeof(buf), "Diagnosis: memcheck %s, hit memcheck=%u, Record dipanggil=%u, cocok=%u, HasMemChecks=%d",
+		found ? "terdaftar" : "TIDAK ada", numHits, (unsigned)g_rawCalls, (unsigned)g_matchCalls, g_breakpoints.HasMemChecks() ? 1 : 0);
+	return buf;
+}
+
+std::string MemDisasm(uint32_t pc) {
+	DisassemblyLineInfo line;
+	g_disassemblyManager.getLine(pc, true, line, currentDebugMIPS);
+	return line.name + (line.params.empty() ? "" : " " + line.params);
+}
+
+// ===========================================================================
+// MemPatcher
+// ===========================================================================
+static std::mutex g_patchLock;
+static std::vector<PatchEntry> g_patches;
+
+int MemPatcher::Add(uint32_t addr, uint32_t newOp, const std::string &label) {
+	if ((addr & 3) != 0 || !Memory::IsActive() || !Memory::IsValidRange(addr, 4))
+		return -1;
+	PatchEntry e;
+	e.addr = addr;
+	e.value = newOp;
+	e.label = label;
+	e.enabled = true;
+	{
+		std::lock_guard<std::mutex> guard(g_patchLock);
+		for (size_t i = 0; i < g_patches.size(); i++) {
+			if (g_patches[i].addr == addr) {
+				// Alamat sama: ganti opcode baru, pertahankan instruksi asli.
+				g_patches[i].value = newOp;
+				g_patches[i].label = label;
+				g_patches[i].enabled = true;
+				MemScanner::WriteAt(addr, 4, newOp);
+				return (int)i;
+			}
+		}
+	}
+	e.orig = Memory::ReadUnchecked_U32(addr);
+	e.origText = MemDisasm(addr);  // sebelum ditimpa
+	MemScanner::WriteAt(addr, 4, newOp);
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	g_patches.push_back(e);
+	return (int)g_patches.size() - 1;
+}
+
+void MemPatcher::Remove(int idx) {
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	if (idx < 0 || idx >= (int)g_patches.size())
+		return;
+	const PatchEntry &e = g_patches[idx];
+	if (Memory::IsActive() && Memory::IsValidRange(e.addr, 4) && Memory::ReadUnchecked_U32(e.addr) == e.value)
+		MemScanner::WriteAt(e.addr, 4, e.orig);
+	g_patches.erase(g_patches.begin() + idx);
+}
+
+void MemPatcher::SetEnabled(int idx, bool on) {
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	if (idx < 0 || idx >= (int)g_patches.size())
+		return;
+	PatchEntry &e = g_patches[idx];
+	e.enabled = on;
+	MemScanner::WriteAt(e.addr, 4, on ? e.value : e.orig);
+}
+
+int MemPatcher::Count() {
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	return (int)g_patches.size();
+}
+
+bool MemPatcher::Get(int idx, PatchEntry *out) {
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	if (idx < 0 || idx >= (int)g_patches.size())
+		return false;
+	*out = g_patches[idx];
+	return true;
+}
+
+void MemPatcher::Apply() {
+	std::lock_guard<std::mutex> guard(g_patchLock);
+	if (g_patches.empty() || !Memory::IsActive())
+		return;
+	for (const PatchEntry &e : g_patches) {
+		if (!e.enabled || !Memory::IsValidRange(e.addr, 4))
+			continue;
+		// Hanya tulis ulang jika kode di situ kembali ke aslinya (mis. dimuat ulang).
+		// Jika berisi hal lain (overlay berbeda), biarkan.
+		if (Memory::ReadUnchecked_U32(e.addr) == e.orig && e.value != e.orig)
+			MemScanner::WriteAt(e.addr, 4, e.value);
+	}
+}
+
+// ===========================================================================
+// PointerScanner
+// ===========================================================================
+static std::vector<PtrChain> g_chains;
+static uint32_t g_chainTarget = 0;
+static int g_chainTargetSize = 4;
+static const size_t MAX_CHAINS = 5000;
+static const size_t LEVEL_CAP = 3000;     // maksimum simpul baru per tingkat
+static const int PER_TARGET_CAP = 32;     // maksimum pemegang pointer per target
+
+const std::vector<PtrChain> &PointerScanner::Results() { return g_chains; }
+uint32_t PointerScanner::Target() { return g_chainTarget; }
+int PointerScanner::TargetSize() { return g_chainTargetSize; }
+void PointerScanner::Clear() { g_chains.clear(); g_chains.shrink_to_fit(); }
+
+bool PointerScanner::Resolve(const PtrChain &c, uint32_t *out) {
+	if (c.offsets.empty() || !Memory::IsActive() || !Memory::IsValidRange(c.base, 4))
+		return false;
+	uint32_t p = Memory::ReadUnchecked_U32(c.base);
+	for (size_t i = 0; i + 1 < c.offsets.size(); i++) {
+		const uint32_t a = p + (uint32_t)c.offsets[i];
+		if (!Memory::IsValidRange(a, 4))
+			return false;
+		p = Memory::ReadUnchecked_U32(a);
+	}
+	*out = p + (uint32_t)c.offsets.back();
+	return true;
+}
+
+std::string PointerScanner::Describe(const PtrChain &c) {
+	char buf[64];
+	snprintf(buf, sizeof(buf), "[0x%08X]", c.base);
+	std::string s = buf;
+	for (size_t i = 0; i < c.offsets.size(); i++) {
+		snprintf(buf, sizeof(buf), "+0x%X", (unsigned)c.offsets[i]);
+		if (i + 1 < c.offsets.size())
+			s = "[" + s + buf + "]";
+		else
+			s += buf;
+	}
+	return s;
+}
+
+int PointerScanner::Scan(uint32_t target, int targetSize, int maxDepth, uint32_t maxOffset) {
+	g_chains.clear();
+	g_chainTarget = target;
+	g_chainTargetSize = targetSize;
+	const uint32_t start = SCAN_START, end = ScanEnd(), len = end - start;
+	if (!Memory::IsActive() || !Memory::IsValidRange(start, len))
+		return 0;
+	if (maxDepth < 1) maxDepth = 1;
+	if (maxDepth > 4) maxDepth = 4;
+	const uint8_t *ram = Memory::GetPointerUnchecked(start);
+
+	// 1) Kumpulkan semua kata 32-bit yang tampak seperti pointer ke RAM user.
+	struct PW { uint32_t value, holder; };
+	std::vector<PW> pw;
+	pw.reserve(len / 16);
+	for (uint32_t off = 0; off + 4 <= len; off += 4) {
+		uint32_t v;
+		memcpy(&v, ram + off, 4);
+		if (v >= start && v < end)
+			pw.push_back({ v, start + off });
+	}
+	std::sort(pw.begin(), pw.end(), [](const PW &a, const PW &b) {
+		return a.value != b.value ? a.value < b.value : a.holder < b.holder;
+	});
+
+	// 2) Telusuri mundur level demi level: siapa yang menunjuk ke target, siapa yang menunjuk ke penunjuk itu, dst.
+	struct Node { uint32_t holder; int32_t off; int parent; };
+	std::vector<Node> nodes;
+	std::unordered_set<uint32_t> seen;
+	std::vector<std::pair<uint32_t, int>> frontier = { { target, -1 } };
+	for (int depth = 1; depth <= maxDepth && !frontier.empty(); depth++) {
+		std::vector<Node> cand;
+		for (const auto &f : frontier) {
+			const uint32_t X = f.first;
+			auto hi = std::upper_bound(pw.begin(), pw.end(), X, [](uint32_t x, const PW &p) { return x < p.value; });
+			int taken = 0;
+			for (auto it = hi; it != pw.begin() && taken < PER_TARGET_CAP;) {
+				--it;
+				if (X - it->value > maxOffset)
+					break;
+				if (it->holder == X || seen.count(it->holder))
+					continue;
+				cand.push_back({ it->holder, (int32_t)(X - it->value), f.second });
+				taken++;
+			}
+		}
+		// Prioritaskan alamat rendah (area data statis lebih mungkin di sana) dan buang duplikat.
+		std::sort(cand.begin(), cand.end(), [](const Node &a, const Node &b) { return a.holder < b.holder; });
+		cand.erase(std::unique(cand.begin(), cand.end(), [](const Node &a, const Node &b) { return a.holder == b.holder; }), cand.end());
+		if (cand.size() > LEVEL_CAP)
+			cand.resize(LEVEL_CAP);
+		frontier.clear();
+		for (const Node &n : cand) {
+			nodes.push_back(n);
+			seen.insert(n.holder);
+			frontier.push_back({ n.holder, (int)nodes.size() - 1 });
+		}
+	}
+
+	// 3) Ubah tiap simpul jadi chain: base = penyimpan terluar, offset dari luar ke dalam.
+	g_chains.reserve(std::min(nodes.size(), MAX_CHAINS * 2));
+	for (size_t i = 0; i < nodes.size(); i++) {
+		PtrChain c;
+		c.base = nodes[i].holder;
+		for (int idx = (int)i; idx >= 0; idx = nodes[idx].parent)
+			c.offsets.push_back(nodes[idx].off);
+		g_chains.push_back(std::move(c));
+	}
+	std::sort(g_chains.begin(), g_chains.end(), [](const PtrChain &a, const PtrChain &b) {
+		if (a.base != b.base)
+			return a.base < b.base;
+		return a.offsets.size() < b.offsets.size();
+	});
+	if (g_chains.size() > MAX_CHAINS)
+		g_chains.resize(MAX_CHAINS);
+	return (int)g_chains.size();
+}
+
+int PointerScanner::FilterFor(uint32_t newTarget) {
+	std::vector<PtrChain> kept;
+	for (const PtrChain &c : g_chains) {
+		uint32_t out = 0;
+		if (Resolve(c, &out) && out == newTarget)
+			kept.push_back(c);
+	}
+	g_chains.swap(kept);
+	g_chainTarget = newTarget;
+	return (int)g_chains.size();
 }
