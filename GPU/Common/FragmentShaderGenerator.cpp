@@ -15,17 +15,9 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <cstdint>
-#include <cstring>
-#include <fstream>
-#include <map>
-#include <mutex>
-#include <string>
 #include <cstdio>
 #include <sstream>
 
-#include "Common/File/FileUtil.h"
-#include "Common/File/Path.h"
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
@@ -43,99 +35,6 @@
 #include "GPU/GPUState.h"
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
-
-#ifdef __FRAGMENT_GLSL_FILE__
-// ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/fs001.glsl, fs002.glsl, dst (nomor urut).
-// Kalau file belum ada: hasil generator ditulis ke file (dump).
-// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
-#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
-// Folder dump & replace shader di Android.
-#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
-#endif
-#ifndef GLSL_REPLACE_BUFFER_SIZE
-// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
-#define GLSL_REPLACE_BUFFER_SIZE 16384
-#endif
-
-// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/fs_index.txt
-// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
-// Jangan hapus fs_index.txt tanpa menghapus semua fs*.glsl, karena nomornya akan berubah.
-static int FsGlslIndex(uint64_t hash, const Path &dir) {
-	static std::mutex mtx;
-	static bool loaded = false;
-	static std::map<uint64_t, int> indexOf;
-	static int nextIndex = 1;
-	std::lock_guard<std::mutex> lock(mtx);
-	const std::string mapFile = (dir / std::string("fs_index.txt")).ToString();
-	if (!loaded) {
-		loaded = true;
-		std::ifstream in(mapFile);
-		unsigned long long h = 0;
-		int idx = 0;
-		while (in >> std::hex >> h >> std::dec >> idx) {
-			indexOf[(uint64_t)h] = idx;
-			if (idx >= nextIndex) {
-				nextIndex = idx + 1;
-			}
-		}
-	}
-	auto it = indexOf.find(hash);
-	if (it != indexOf.end()) {
-		return it->second;
-	}
-	const int idx = nextIndex++;
-	indexOf[hash] = idx;
-	File::CreateDir(dir);
-	std::ofstream out(mapFile, std::ios::app);
-	if (out.is_open()) {
-		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
-	}
-	return idx;
-}
-
-static void FsGlslReplace(const void *idData, size_t idSize, char *buffer) {
-	// FNV-1a 64-bit atas seluruh byte ID shader.
-	uint64_t hash = 1469598103934665603ULL;
-	const uint8_t *bytes = (const uint8_t *)idData;
-	for (size_t i = 0; i < idSize; i++) {
-		hash ^= bytes[i];
-		hash *= 1099511628211ULL;
-	}
-	char name[64];
-
-#ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
-#else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
-#endif
-	// Nama: fs001.glsl, fs002.glsl, ... (nomor urut tetap dari fs_index.txt).
-	snprintf(name, sizeof(name), "fs%03d.glsl", FsGlslIndex(hash, dir));
-	std::string file = (dir / std::string(name)).ToString();
-
-	std::ifstream in(file, std::ios::binary);
-	if (in.is_open()) {
-		in.seekg(0, std::ios::end);
-		std::streamoff size = in.tellg();
-		in.seekg(0, std::ios::beg);
-		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
-			std::string code((size_t)size, '\0');
-			in.read(&code[0], size);
-			if (in.gcount() == size) {
-				memcpy(buffer, code.data(), (size_t)size);
-				buffer[size] = '\0';
-			}
-		}
-		return;
-	}
-
-	File::CreateDir(dir);
-	std::ofstream out(file, std::ios::binary);
-	if (out.is_open()) {
-		out.write(buffer, (std::streamsize)strlen(buffer));
-	}
-}
-#endif
 
 static const SamplerDef samplersMono[3] = {
 	{ 0, "tex" },
@@ -158,11 +57,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	bool highpFog = false;
 	bool highpTexcoord = false;
 	bool enableFragmentTestCache = gstate_c.Use(GPU_USE_FRAGMENT_TEST_CACHE);
-	bool isPowerVR = (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC);
-	if (isPowerVR) {
-		highpFog = false;
-		highpTexcoord = false;
-	}
 
 	const bool fsMinmaxDiscard = id.Bit(FS_BIT_MINMAX_DISCARD);
 	const bool fsDepthClamp = id.Bit(FS_BIT_DEPTH_CLAMP);
@@ -241,10 +135,20 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	}
 
 	ShaderDepalMode shaderDepalMode = (ShaderDepalMode)id.Bits(FS_BIT_SHADER_DEPAL_MODE, 2);
+	if (shaderDepalMode == ShaderDepalMode::CLUT8 && gstate_c.Use(GPU_USE_FULL_PRECISION_IN_FRAGMENT)) {
+		// The byte coordinate is u * up to 2048: a mediump texcoord (fp16 on Adreno) picks the wrong byte for half
+		// of them past 512, striping SOCOM's night vision. Vulkan always uses highp here.
+		highpTexcoord = true;
+		if (compat.gles) {
+			// Picking the byte also needs more than the default lowp in the rest of the shader: on PowerVR,
+			// SOCOM's night vision came out far too bright.
+			WRITE(p, "precision highp float;\n");
+		}
+	}
 	GEBufferFormat shaderDepalFmt = (GEBufferFormat)(id.Bits(FS_BIT_SHADER_DEPAL_FORMAT, 3));
-	if (texture3D || gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
-    shaderDepalMode = ShaderDepalMode::OFF;
-}
+	if (texture3D) {
+		shaderDepalMode = ShaderDepalMode::OFF;
+	}
 	if (!compat.bitwiseOps && shaderDepalMode != ShaderDepalMode::OFF) {
 		*errorString = "depal requires bitwise ops";
 		return false;
@@ -283,13 +187,15 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	bool fetchFramebuffer = needFramebufferRead && id.Bit(FS_BIT_USE_FRAMEBUFFER_FETCH);
 	bool readFramebufferTex = needFramebufferRead && !id.Bit(FS_BIT_USE_FRAMEBUFFER_FETCH);
 
-	if (fetchFramebuffer && (compat.shaderLanguage != GLSL_3xx || !compat.lastFragData)) {
-		*errorString = "framebuffer fetch requires GLSL 3xx";
+	// Vulkan GLSL reads the framebuffer through an input attachment. Only the Metal backend uses that, where
+	// SPIRV-Cross turns it into programmable blending ([[color(0)]]).
+	if (fetchFramebuffer && compat.shaderLanguage != GLSL_VULKAN && (compat.shaderLanguage != GLSL_3xx || !compat.lastFragData)) {
+		*errorString = "framebuffer fetch requires GLSL 3xx or Vulkan GLSL";
 		return false;
 	}
 
-	bool needFragCoord = readFramebufferTex || gstate_c.Use(GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT);
-	bool writeDepth = (gstate_c.Use(GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT) || fsDepthClamp) && !forceDepthWritesOff;
+	bool needFragCoord = readFramebufferTex || gstate_c.Use(GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT) || shaderDepalMode == ShaderDepalMode::CLUT8;
+	bool writeDepth = (gstate_c.Use(GPU_ROUND_FRAGMENT_DEPTH_TO_16BIT) || fsDepthClamp) && !forceDepthWritesOff && !id.Bit(FS_BIT_NO_DEPTH_WRITE);
 
 	// TODO: We could have a separate mechanism to support more ops using the shader blending mechanism,
 // on hardware that can do proper bit math in fragment shaders.
@@ -316,6 +222,8 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		if (readFramebufferTex) {
 			// The framebuffer texture is always bound as an array.
 			p.F("layout (set = 0, binding = %d) uniform sampler2DArray fbotex;\n", DRAW_BINDING_2ND_TEXTURE);
+		} else if (fetchFramebuffer) {
+			p.F("layout (input_attachment_index = 0, set = 0, binding = %d) uniform subpassInput inputColor;\n", DRAW_BINDING_2ND_TEXTURE);
 		}
 
 		if (shaderDepalMode != ShaderDepalMode::OFF) {
@@ -323,13 +231,15 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		}
 
 		// Note: the precision qualifiers must match the vertex shader!
-		WRITE(p, "layout (location = 1) %s in lowp vec4 v_color0;\n", shading);
+		// Centroid, matching the vertex shader.
+		const char *colorQualifier = *shading ? shading : "centroid";
+		WRITE(p, "layout (location = 1) %s in lowp vec4 v_color0;\n", colorQualifier);
 		if (lmode) {
-			WRITE(p, "layout (location = 2) %s in lowp vec3 v_color1;\n", shading);
+			WRITE(p, "layout (location = 2) %s in lowp vec3 v_color1;\n", colorQualifier);
 		}
 		WRITE(p, "layout (location = 3) in highp float v_fogdepth;\n");
 		if (doTexture) {
-			WRITE(p, "layout (location = 0) in highp vec3 v_texcoord;\n");
+			WRITE(p, "layout (location = 0) centroid in highp vec3 v_texcoord;\n");
 		}
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "layout (location = 4) in highp vec2 v_zw;\n");
@@ -498,11 +408,15 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		if (texture3D) {
 			*uniformMask |= DIRTY_MIPBIAS;
 			WRITE(p, "uniform float u_mipBias;\n");
+		} else if (doTexture && gstate_c.Use(GPU_USE_SHADER_LOD_BIAS)) {
+			*uniformMask |= DIRTY_MIPBIAS;
+			WRITE(p, "uniform float u_texLodBias;\n");
 		}
 
 		if (fsMinmaxDiscard) {
 			*uniformMask |= DIRTY_RASTER_OFFSET;  // they're updated together
-			WRITE(p, "uniform vec2 u_minZmaxZ;\n");
+			// The same precision as in the vertex shader, or PowerVR fails to link the program.
+			WRITE(p, "uniform highp vec2 u_minZmaxZ;\n");
 		}
 
 		// Varyings
@@ -521,48 +435,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		}
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_fs);
-		}
-		// Varying bebas v_1..v_4 (highp vec4), dikirim oleh VS. Default 0 dan tidak mengubah render.
-		// Isi dari vs_*.glsl, dipakai di fs_*.glsl, keduanya diedit manual.
-		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_fs);
-		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_fs);
-		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_fs);
-		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_fs);
-		if (compat.glslES30) {
-			// Harus identik dengan VS: flat in mediump int. Jangan pakai variabel `shading` di sini.
-			WRITE(p, "flat %s mediump int flag;\n", compat.varying_fs);
-		}
-
-		// Waktu dalam detik, diupdate tiap frame (harus highp float, sama dengan di VS).
-		WRITE(p, "uniform highp float u_time;\n");
-		// Batas jarak (view-space) untuk efek blur jauh, dari glsl/fx_params.txt (lihat ShaderManagerGLES).
-		WRITE(p, "uniform highp float u_near;\n");
-		WRITE(p, "uniform highp float u_far;\n");
-
-		if (compat.glslES30) {
-			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
-			//  - flag 1 (MODEL): pakai v_1.xyz dari VS, dinormalisasi ulang karena hasil interpolasi
-			//    tidak lagi panjang 1.
-			//  - flag 0/2 (DUNIA dll, tanpa normal vertex): normal permukaan dari turunan posisi
-			//    view-space (v_3). Arah dibalik kalau membelakangi kamera (kamera di titik asal).
-			// Turunan dihitung sebelum percabangan supaya valid (uniform control flow).
-			WRITE(p, "highp vec3 getFxNormal() {\n");
-			WRITE(p, "  highp vec3 nV = cross(dFdx(v_3.xyz), dFdy(v_3.xyz));\n");
-			WRITE(p, "  if (flag == 1) {\n");
-			WRITE(p, "    highp float l1 = dot(v_1.xyz, v_1.xyz);\n");
-			WRITE(p, "    return l1 > 0.0 ? v_1.xyz * inversesqrt(l1) : vec3(0.0, 0.0, 1.0);\n");
-			WRITE(p, "  }\n");
-			WRITE(p, "  if (dot(nV, v_3.xyz) > 0.0) nV = -nV;\n");
-			WRITE(p, "  highp float l2 = dot(nV, nV);\n");
-			WRITE(p, "  return l2 > 0.0 ? nV * inversesqrt(l2) : vec3(0.0, 0.0, 1.0);\n");
-			WRITE(p, "}\n");
-
-			// Kekuatan blur jarak jauh, 0..1. Hanya untuk dunia (flag 2); model, HUD, partikel = 0.
-			// 0 saat jarak <= u_near, 1 saat jarak >= u_far.
-			WRITE(p, "highp float getFarBlur() {\n");
-			WRITE(p, "  if (flag != 2) return 0.0;\n");
-			WRITE(p, "  return smoothstep(u_near, u_far, abs(v_3.z));\n");
-			WRITE(p, "}\n");
 		}
 
 		if (!enableFragmentTestCache) {
@@ -702,6 +574,13 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		if (doTexture) {
 			char texcoord[64] = "v_texcoord";
+			if (doTextureProjection) {
+				// Where q isn't positive, the GE samples the last texel instead of dividing (gpu/texmtx/negq, and
+				// GE_NONPOSITIVE_Q_UV in the software renderer). Dividing by a negative q mirrors the texture behind the
+				// projector: Fate/Extra's projected shadows ran up the walls (#18667).
+				WRITE(p, "  vec3 projTexcoord = v_texcoord.z > 0.0 ? v_texcoord : vec3(0.99998474, 0.99998474, 1.0);\n");
+				truncate_cpy(texcoord, "projTexcoord");
+			}
 			// TODO: Not sure the right way to do this for projection.
 			// This path destroys resolution on older PowerVR no matter what I do if projection is needed,
 			// so we disable it on SGX 540 and lesser, and live with the consequences.
@@ -718,8 +597,8 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				std::string ucoord = "v_texcoord.x";
 				std::string vcoord = "v_texcoord.y";
 				if (doTextureProjection) {
-					ucoord = "(v_texcoord.x / v_texcoord.z)";
-					vcoord = "(v_texcoord.y / v_texcoord.z)";
+					ucoord = "(projTexcoord.x / projTexcoord.z)";
+					vcoord = "(projTexcoord.y / projTexcoord.z)";
 				}
 
 				std::string modulo = (gl_extensions.bugs & BUG_PVR_SHADER_PRECISION_BAD) ? "mymod" : "mod";
@@ -748,13 +627,13 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				if (compat.shaderLanguage == HLSL_D3D11) {
 					if (texture3D) {
 						if (doTextureProjection) {
-							WRITE(p, "  vec4 t = tex.Sample(texSamp, vec3(v_texcoord.xy / v_texcoord.z, u_mipBias));\n");
+							WRITE(p, "  vec4 t = tex.Sample(texSamp, vec3(%s.xy / %s.z, u_mipBias));\n", texcoord, texcoord);
 						} else {
 							WRITE(p, "  vec4 t = tex.Sample(texSamp, vec3(%s.xy, u_mipBias));\n", texcoord);
 						}
 					} else {
 						if (doTextureProjection) {
-							WRITE(p, "  vec4 t = tex.Sample(texSamp, v_texcoord.xy / v_texcoord.z);\n");
+							WRITE(p, "  vec4 t = tex.Sample(texSamp, %s.xy / %s.z);\n", texcoord, texcoord);
 						} else {
 							WRITE(p, "  vec4 t = tex.Sample(texSamp, %s.xy);\n", texcoord);
 						}
@@ -781,10 +660,11 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 							WRITE(p, "  vec4 t = %s(tex, vec3(%s.xy, %s));\n", compat.texture, texcoord, arrayIndex);
 						}
 					} else {
+						const char *lodBias = gstate_c.Use(GPU_USE_SHADER_LOD_BIAS) ? ", u_texLodBias" : "";
 						if (doTextureProjection) {
-							WRITE(p, "  vec4 t = %sProj(tex, %s);\n", compat.texture, texcoord);
+							WRITE(p, "  vec4 t = %sProj(tex, %s%s);\n", compat.texture, texcoord, lodBias);
 						} else {
-							WRITE(p, "  vec4 t = %s(tex, %s.xy);\n", compat.texture, texcoord);
+							WRITE(p, "  vec4 t = %s(tex, %s.xy%s);\n", compat.texture, texcoord, lodBias);
 						}
 					}
 				}
@@ -937,29 +817,69 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				WRITE(p, "    t = mix(t, t2, fraction.y);\n");
 				WRITE(p, "  }\n");
 				break;
-			case ShaderDepalMode::CLUT8_8888:
+			case ShaderDepalMode::CLUT8:
+			{
+				// Byte coordinates reach the thousands, past what fp16 (which NVIDIA's Vulkan driver uses for the
+				// default lowp) holds to a fraction, so use the best precision there is (#22481).
+				const char *prec = gstate_c.Use(GPU_USE_FULL_PRECISION_IN_FRAGMENT) ? "highp" : "mediump";
 				if (doTextureProjection) {
 					// We don't use textureProj because we need better control and it's probably not much of a savings anyway.
 					// However it is good for precision on older hardware like PowerVR.
-					p.F("  vec2 uv = %s.xy/%s.z;\n  vec2 uv_round;\n", texcoord, texcoord);
+					p.F("  %s vec2 uv = %s.xy/%s.z;\n  %s vec2 uv_round;\n", prec, texcoord, texcoord, prec);
 				} else {
-					p.F("  vec2 uv = %s.xy;\n  vec2 uv_round;\n", texcoord);
+					p.F("  %s vec2 uv = %s.xy;\n  %s vec2 uv_round;\n", prec, texcoord, prec);
 				}
-				p.C("  vec2 tsize = vec2(textureSize(tex, 0).xy);\n");
-				p.C("  uv_round = floor(uv * tsize);\n");
-				p.C("  int component = int(uv_round.x) & 3;\n");
-				p.C("  uv_round.x *= 0.25;\n");
-				p.C("  uv_round /= tsize;\n");
-				p.C("  vec4 t = ").SampleTexture2D("tex", "uv_round").C(";\n");
+				// The texture size in PSP pixels (u counts bytes), not the scaled framebuffer's.
+				p.F("  %s vec2 tsize = 0.5 / u_texclamp.zw;\n", prec);
+				// The GE samples at the pixel center, and all the render pixels of a PSP pixel must read what its one
+				// sample does, so move to the PSP pixel's center along x (which picks the byte). scale is render pixels
+				// per PSP pixel.
+				p.F("  %s float scale = float(textureSize(tex, 0).x) * 2.0 * u_texclamp.z;\n", prec);
+				p.F("  uv.x += (0.5 * scale - mod(gl_FragCoord.x, scale)) * %s(uv.x);\n", compat.shaderLanguage == HLSL_D3D11 ? "ddx" : "dFdx");
+				// The GE truncates to 1/16 texel (gpu/probe exp57). A center exactly on a byte edge (u = 1 + 2x reading a
+				// 16-bit framebuffer) lands on it only when the sprite's u gradient is exact (exp256). For the others the
+				// CPU nudged u down 0.03 of a step (SoftwareTransformCommon's ExpandRectangles); half that covers float error.
+				p.C("  uv_round = floor(floor(uv * tsize * 16.0 + 0.015) * 0.0625);\n");
+				if (shaderDepalFmt == GE_FORMAT_8888) {
+					p.C("  int component = int(uv_round.x) & 3;\n");
+					p.C("  uv_round.x = floor(uv_round.x * 0.25);\n");
+				} else {
+					p.C("  int component = int(uv_round.x) & 1;\n");
+					p.C("  uv_round.x = floor(uv_round.x * 0.5);\n");
+				}
+				p.C("  uv_round = (uv_round + 0.5) / tsize;\n");
+				// The byte decodes below are exact in fp32, but the product rounding in fp16 makes 16 of 256 bytes come out one low.
+				p.F("  %s vec4 t = ", prec).SampleTexture2D("tex", "uv_round").C(";\n");
 				p.C("  int index;\n");
-				p.C("  switch (component) {\n");
-				p.C("  case 0: index = int(t.x * 254.99); break;\n");  // TODO: Not sure why 254.99 instead of 255.99, but it's currently needed.
-				p.C("  case 1: index = int(t.y * 254.99); break;\n");
-				p.C("  case 2: index = int(t.z * 254.99); break;\n");
-				p.C("  case 3: index = int(t.w * 254.99); break;\n");
-				p.C("  }\n");
+				switch (shaderDepalFmt) {
+				case GE_FORMAT_8888:
+					p.C("  switch (component) {\n");
+					p.C("  case 0: index = int(t.x * 255.99); break;\n");
+					p.C("  case 1: index = int(t.y * 255.99); break;\n");
+					p.C("  case 2: index = int(t.z * 255.99); break;\n");
+					p.C("  case 3: index = int(t.w * 255.99); break;\n");
+					p.C("  }\n");
+					break;
+				default:
+					// Rebuild the 16-bit pixel, truncating like the GE stores it, then take its low or high byte.
+					switch (shaderDepalFmt) {
+					case GE_FORMAT_565:
+						p.C("  int pixel = int(t.x * 31.99) | (int(t.y * 63.99) << 5) | (int(t.z * 31.99) << 11);\n");
+						break;
+					case GE_FORMAT_5551:
+						p.C("  int pixel = int(t.x * 31.99) | (int(t.y * 31.99) << 5) | (int(t.z * 31.99) << 10) | (int(t.w) << 15);\n");
+						break;
+					default:
+						p.C("  int pixel = int(t.x * 15.99) | (int(t.y * 15.99) << 4) | (int(t.z * 15.99) << 8) | (int(t.w * 15.99) << 12);\n");
+						break;
+					}
+					p.C("  index = (pixel >> (component * 8)) & 0xFF;\n");
+					break;
+				}
+				p.C("  index = int(((uint(index) >> ((u_depal_mask_shift_off_fmt >> 0x8u) & 0xFFu)) & (u_depal_mask_shift_off_fmt & 0xFFu)) | (((u_depal_mask_shift_off_fmt >> 0x10u) & 0xFFu) << 0x4u));\n");
 				p.C("  t = ").LoadTexture2D("pal", "ivec2(index, 0)", 0).C(";\n");
 				break;
+			}
 			}
 
 			WRITE(p, "  vec4 p = v_color0;\n");
@@ -1156,7 +1076,28 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				return false;
 			}
 
-			WRITE(p, "  v.rgb = v.rgb * %s;\n", srcFactor);
+			if (replaceBlend == REPLACE_BLEND_PRE_SRC && replaceBlendFuncA == GE_SRCBLEND_FIXA && IsGEExactFixedBlend(replaceBlendFuncB, replaceBlendEq)) {
+				// The GE's product of a color and a factor is floor((2c+1)(2f+1)/1024), and the hardware blend multiplies
+				// the dst by (2B+1)/512 (see ConvertBlendState). Lowering the src term by 0.5 - (2B+1)/1024 turns the
+				// rounding of the sum into the GE's floor, except where that would go below zero.
+				// The color is truncated too: the GE's bilinear filter truncates (4-bit weights, see the software
+				// Sampler), and rounding the GPU's finer filtered value instead makes each texel about a level
+				// brighter. That doubles God Eater Burst's faint bloom, which feeds back into itself pass after pass.
+				// The 0.01 keeps an unfiltered texel's exact integer from flooring a level down on float error.
+				// The product is computed as (c+0.5) * (2f+1)/512 to stay within fp16's range. That's exact in fp32,
+				// while in fp16 about 3% of results come out a level too bright, so use highp where we have it.
+				// The default precision is lowp, which can be fixed point, and NVIDIA's Vulkan driver runs it as fp16.
+				const char *prec = gstate_c.Use(GPU_USE_FULL_PRECISION_IN_FRAGMENT) ? "highp" : "mediump";
+				WRITE(p, "  %s vec3 fixA2 = u_blendFixA;\n", prec);
+				WRITE(p, "  %s vec3 fixB2 = u_blendFixB;\n", prec);
+				WRITE(p, "  %s vec3 srcTerm = v.rgb;\n", prec);
+				WRITE(p, "  fixA2 = floor(fixA2 * 510.0 + 0.5) + 1.0;\n");
+				WRITE(p, "  fixB2 = floor(fixB2 * 510.0 + 0.5) + 1.0;\n");
+				WRITE(p, "  srcTerm = floor((floor(srcTerm * 255.0 + 0.01) + 0.5) * (fixA2 / 512.0));\n");
+				WRITE(p, "  v.rgb = (srcTerm - 0.5 + fixB2 / 1024.0) / 255.0;\n");
+			} else {
+				WRITE(p, "  v.rgb = v.rgb * %s;\n", srcFactor);
+			}
 		}
 
 		if (replaceBlend == REPLACE_BLEND_READ_FRAMEBUFFER) {
@@ -1352,10 +1293,14 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 			if (fsDepthClamp) {
 				WRITE(p, "  gl_FragDepth = clamp(floor(projZ), 0.0, 65535.0) / 65535.0;\n");
 			} else {
-				WRITE(p, "  gl_FragDepth = floor(gl_FragCoord.z * 65535.0) / 65535.0;\n");
+				// gl_FragCoord.z is the PSP's Z / 65536. Flat draws land exactly on an integer Z, so floor with some
+				// room for float error, which differs with W (Patlabor's HUD redraws an icon with GEQUAL). Then store
+				// Z / 65535 like clears and the clamp path above.
+				WRITE(p, "  gl_FragDepth = floor(gl_FragCoord.z * 65536.0 + 0.01) / 65535.0;\n");
 			}
 		} else if (fsDepthClamp) {
-			WRITE(p, "  gl_FragDepth = clamp(projZ, 0.0, 65535.0) / 65535.0;\n");
+			// What the vertex shader's Z / 65536 gives with hardware depth clamp.
+			WRITE(p, "  gl_FragDepth = clamp(projZ * (1.0 / 65536.0), 0.0, 1.0);\n");
 		}
 	} else if (useDiscardStencilBugWorkaround) {
 		// Adreno and some Mali drivers apply early frag tests even with discard in the shader,
@@ -1373,12 +1318,6 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 	}
 
 	WRITE(p, "}\n");
-
-#ifdef __FRAGMENT_GLSL_FILE__
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-		FsGlslReplace(&id, sizeof(id), buffer);
-	}
-#endif
 
 	return true;
 }

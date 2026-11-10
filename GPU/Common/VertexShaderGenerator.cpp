@@ -15,14 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <cstdint>
-#include <cstring>
-#include <fstream>
-#include <map>
-#include <mutex>
-#include <string>
-#include "Common/File/FileUtil.h"
-#include "Common/File/Path.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/GPU/ShaderWriter.h"
@@ -39,99 +31,6 @@
 #undef WRITE
 
 #define WRITE(p, ...) p.F(__VA_ARGS__)
-
-#ifdef __VERTEXT_GLSL_FILE__
-// ---- Shader dump & replace (OpenGL only) ----
-// File shader dibaca/ditulis di GLSL_REPLACE_DIR (Android: /storage/emulated/0/PSP/glsl/) atau <memstick>/glsl/vs001.glsl, vs002.glsl, dst (nomor urut).
-// Kalau file belum ada: hasil generator ditulis ke file (dump).
-// Kalau file ada: isinya menggantikan seluruh kode shader (replace).
-#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
-// Folder dump & replace shader di Android.
-#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
-#endif
-#ifndef GLSL_REPLACE_BUFFER_SIZE
-// Samakan dengan ukuran buffer kode shader di ShaderManagerGLES (versi lama: 16384).
-#define GLSL_REPLACE_BUFFER_SIZE 16384
-#endif
-
-// Nomor urut tetap untuk tiap shader. Peta hash -> nomor disimpan di <glsl>/vs_index.txt
-// (satu baris per shader: "<hash hex> <nomor>"), jadi nomornya sama di setiap sesi.
-// Jangan hapus vs_index.txt tanpa menghapus semua vs*.glsl, karena nomornya akan berubah.
-static int VsGlslIndex(uint64_t hash, const Path &dir) {
-	static std::mutex mtx;
-	static bool loaded = false;
-	static std::map<uint64_t, int> indexOf;
-	static int nextIndex = 1;
-	std::lock_guard<std::mutex> lock(mtx);
-	const std::string mapFile = (dir / std::string("vs_index.txt")).ToString();
-	if (!loaded) {
-		loaded = true;
-		std::ifstream in(mapFile);
-		unsigned long long h = 0;
-		int idx = 0;
-		while (in >> std::hex >> h >> std::dec >> idx) {
-			indexOf[(uint64_t)h] = idx;
-			if (idx >= nextIndex) {
-				nextIndex = idx + 1;
-			}
-		}
-	}
-	auto it = indexOf.find(hash);
-	if (it != indexOf.end()) {
-		return it->second;
-	}
-	const int idx = nextIndex++;
-	indexOf[hash] = idx;
-	File::CreateDir(dir);
-	std::ofstream out(mapFile, std::ios::app);
-	if (out.is_open()) {
-		out << std::hex << (unsigned long long)hash << std::dec << " " << idx << "\n";
-	}
-	return idx;
-}
-
-static void VsGlslReplace(const void *idData, size_t idSize, char *buffer) {
-	// FNV-1a 64-bit atas seluruh byte ID shader.
-	uint64_t hash = 1469598103934665603ULL;
-	const uint8_t *bytes = (const uint8_t *)idData;
-	for (size_t i = 0; i < idSize; i++) {
-		hash ^= bytes[i];
-		hash *= 1099511628211ULL;
-	}
-	char name[64];
-
-#ifdef GLSL_REPLACE_DIR
-	Path dir = Path(std::string(GLSL_REPLACE_DIR));
-#else
-	Path dir = g_Config.memStickDirectory / std::string("glsl");
-#endif
-	// Nama: vs001.glsl, vs002.glsl, ... (nomor urut tetap dari vs_index.txt).
-	snprintf(name, sizeof(name), "vs%03d.glsl", VsGlslIndex(hash, dir));
-	std::string file = (dir / std::string(name)).ToString();
-
-	std::ifstream in(file, std::ios::binary);
-	if (in.is_open()) {
-		in.seekg(0, std::ios::end);
-		std::streamoff size = in.tellg();
-		in.seekg(0, std::ios::beg);
-		if (size > 0 && size < (std::streamoff)GLSL_REPLACE_BUFFER_SIZE) {
-			std::string code((size_t)size, '\0');
-			in.read(&code[0], size);
-			if (in.gcount() == size) {
-				memcpy(buffer, code.data(), (size_t)size);
-				buffer[size] = '\0';
-			}
-		}
-		return;
-	}
-
-	File::CreateDir(dir);
-	std::ofstream out(file, std::ios::binary);
-	if (out.is_open()) {
-		out.write(buffer, (std::streamsize)strlen(buffer));
-	}
-}
-#endif
 
 // Depth range and viewport
 //
@@ -170,7 +69,8 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	*vertexShaderFlags = (VertexShaderFlags)0;
 
 	bool highpFog = false;
-	bool highpTexcoord = false;
+	// Highp costs nothing here, and the fragment shader can then pick it up where it needs it (CLUT8 depal).
+	bool highpTexcoord = gstate_c.Use(GPU_USE_FULL_PRECISION_IN_FRAGMENT);
 
 	const bool isModeThrough = id.Bit(VS_BIT_IS_THROUGH);
 	const bool useHWTransform = id.Bit(VS_BIT_USE_HW_TRANSFORM);
@@ -210,17 +110,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 
 	ShaderWriter p(buffer, compat, ShaderStage::Vertex, extensions);
 
-	{
-		// Penanda jenis shader supaya dump gampang dikenali (hanya komentar, tidak mengubah render).
-		// MODEL = hardware transform dan punya normal (karakter dll), DUNIA = hardware transform
-		// tanpa normal (bangunan/tanah), LAIN = software transform / through mode (partikel, 2D, UI).
-		const bool vsHwNotThrough = useHWTransform && !isModeThrough;
-		const char *vsKind = "LAIN (partikel/2D/UI)";
-		if (vsHwNotThrough) {
-			vsKind = id.Bit(VS_BIT_HAS_NORMAL) ? "MODEL" : "DUNIA";
-		}
-		WRITE(p, "// [%s]\n", vsKind);
-	}
 	p.C("// %").W(id.Description()).endl();
 
 	bool lmode = id.Bit(VS_BIT_LMODE);
@@ -244,19 +133,16 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	int ls0 = id.Bits(VS_BIT_LS0, 2);
 	int ls1 = id.Bits(VS_BIT_LS1, 2);
 	bool enableLighting = id.Bit(VS_BIT_LIGHTING_ENABLE);
-
-	// Flag jenis draw, dikirim ke fragment shader (flat int flag):
-	//   0 = LAIN  (software transform / through: partikel, 2D, UI)
-	//   1 = MODEL (HW transform + ada normal: karakter 3D dll)
-	//   2 = DUNIA (HW transform tanpa normal: bangunan / tanah)
-	// Ditentukan otomatis dari ID shader, jadi tidak perlu edit manual di file glsl.
-	const bool vsHwNotThroughFlag = useHWTransform && !isModeThrough;
-	const int vsFlag = vsHwNotThroughFlag ? (hasNormal ? 1 : 2) : 0;
-	const bool useFlagVarying = ShaderLanguageIsOpenGL(compat.shaderLanguage) && compat.glslES30;
+	// Colors lit on the CPU come in cpulit0 and cpulit1, and are used where cpulit1.a is set.
+	const bool cpuLit = id.Bit(VS_BIT_CPU_LIT) && useHWTransform && enableLighting;
+	// See PVR_UNUSED_DYNAMIC_UBO_OVERRUN: every vertex shader reads the lights UBO, which is bound as dynamic either way.
+	const bool readUnusedLights = compat.shaderLanguage == GLSL_VULKAN && !enableLighting && !doShadeMapping && bugs.Has(Draw::Bugs::PVR_UNUSED_DYNAMIC_UBO_OVERRUN);
 	int matUpdate = id.Bits(VS_BIT_MATERIAL_UPDATE, 3);
 
 	bool lightUberShader = id.Bit(VS_BIT_LIGHT_UBERSHADER) && enableLighting;  // checking lighting here for the shader test's benefit, in reality if ubershader is set, lighting is set.
-	if (lightUberShader && !compat.bitwiseOps) {
+	// With the ubershader, shade mapping reads its lights' type and computation from u_lightControl.
+	bool shadeUberShader = id.Bit(VS_BIT_LIGHT_UBERSHADER) && doShadeMapping;
+	if ((lightUberShader || shadeUberShader) && !compat.bitwiseOps) {
 		*errorString = "Light ubershader requires bitwise ops in shader language";
 		return false;
 	}
@@ -294,8 +180,8 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 	if (compat.shaderLanguage == GLSL_VULKAN) {
 		WRITE(p, "\n");
 
-		WRITE(p, "layout (std140, set = 0, binding = %d) uniform baseVars {\n%s};\n", DRAW_BINDING_DYNUBO_BASE, ub_baseStr);
-		if (enableLighting || doShadeMapping)
+		WRITE(p, "layout (std140, set = 0, binding = %d) uniform baseVars {\n%s%s};\n", DRAW_BINDING_DYNUBO_BASE, ub_baseStr, gstate_c.Use(GPU_USE_VIRTUAL_REALITY) ? ub_vrStr : "");
+		if (enableLighting || doShadeMapping || readUnusedLights)
 			WRITE(p, "layout (std140, set = 0, binding = %d) uniform lightVars {\n%s};\n", DRAW_BINDING_DYNUBO_LIGHT, ub_vs_lightsStr);
 
 		if (useHWTransform)
@@ -321,13 +207,20 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			if (lmode && !useHWTransform)  // only software transform supplies color1 as vertex data
 				WRITE(p, "layout (location = %d) in vec3 color1;\n", (int)PspAttributeLocation::COLOR1);
 		}
-
-		WRITE(p, "layout (location = 1) %sout lowp vec4 v_color0;\n", shading);
-		if (lmode) {
-			WRITE(p, "layout (location = 2) %sout lowp vec3 v_color1;\n", shading);
+		if (cpuLit) {
+			WRITE(p, "layout (location = %d) in vec4 cpulit0;\n", (int)PspAttributeLocation::CPU_LIT0);
+			WRITE(p, "layout (location = %d) in vec4 cpulit1;\n", (int)PspAttributeLocation::CPU_LIT1);
 		}
 
-		WRITE(p, "layout (location = 0) out highp vec3 v_texcoord;\n");
+		// Centroid keeps them inside the primitive on pixels it only partly covers with MSAA, so that
+		// textures aren't sampled from outside the UV range. Without MSAA, it's the same as center.
+		const char *colorQualifier = *shading ? shading : "centroid ";
+		WRITE(p, "layout (location = 1) %sout lowp vec4 v_color0;\n", colorQualifier);
+		if (lmode) {
+			WRITE(p, "layout (location = 2) %sout lowp vec3 v_color1;\n", colorQualifier);
+		}
+
+		WRITE(p, "layout (location = 0) centroid out highp vec3 v_texcoord;\n");
 
 		WRITE(p, "layout (location = 3) out highp float v_fogdepth;\n");
 
@@ -349,6 +242,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			}
 			if (hasColor || !useHWTransform) {
 				WRITE(p, "  vec4 color0 : COLOR0;\n");
+			}
+			if (cpuLit) {
+				WRITE(p, "  vec4 cpulit0 : COLOR2;\n");
+				WRITE(p, "  vec4 cpulit1 : COLOR3;\n");
 			}
 			if (hasNormal) {
 				WRITE(p, "  vec3 normal : NORMAL;\n");
@@ -412,7 +309,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		*attrMask |= 1 << ATTR_POSITION;
 
 		if (useHWTransform && hasNormal) {
-			WRITE(p, "%s highp vec3 normal;\n", compat.attribute);  // highp: normal presisi penuh untuk efek
+			WRITE(p, "%s mediump vec3 normal;\n", compat.attribute);
 			*attrMask |= 1 << ATTR_NORMAL;
 		}
 		if (!useHWTransform) {
@@ -438,12 +335,18 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				*attrMask |= 1 << ATTR_COLOR1;
 			}
 		}
+		if (cpuLit) {
+			WRITE(p, "%s lowp vec4 cpulit0;\n", compat.attribute);
+			WRITE(p, "%s lowp vec4 cpulit1;\n", compat.attribute);
+			*attrMask |= (1 << ATTR_CPU_LIT0) | (1 << ATTR_CPU_LIT1);
+		}
 
 		WRITE(p, "uniform vec4 u_xywh;\n");
 		WRITE(p, "uniform float u_NaN;\n");
 		*uniformMask |= DIRTY_FRAMEBUFFER_DIM;
 
-		WRITE(p, "uniform vec2 u_minZmaxZ;\n");
+		// highp to match the fragment shader's (see there).
+		WRITE(p, "uniform highp vec2 u_minZmaxZ;\n");
 		*uniformMask |= DIRTY_RASTER_OFFSET;  // this flag is shared with raster offset.
 
 		if (!isModeThrough) {
@@ -470,7 +373,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "uniform vec4 u_uvscaleoffset;\n");
 			*uniformMask |= DIRTY_UVSCALEOFFSET;
 
-			if (lightUberShader) {
+			if (lightUberShader || shadeUberShader) {
 				p.C("uniform uint u_lightControl;\n");
 				*uniformMask |= DIRTY_LIGHT_CONTROL;
 			}
@@ -524,8 +427,6 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		}
 		WRITE(p, "uniform highp vec2 u_fogcoef;\n");
 		*uniformMask |= DIRTY_FOGCOEF;
-		// Waktu (detik) untuk efek animasi. Diupdate tiap frame dari ShaderManagerGLES (bukan lewat uniformMask).
-		WRITE(p, "uniform highp float u_time;\n");
 
 		WRITE(p, "%s%s lowp vec4 v_color0;\n", shading, compat.varying_vs);
 		if (lmode) {
@@ -544,24 +445,29 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		if (fsMinmaxDiscard || fsDepthClamp) {
 			WRITE(p, "%s highp vec2 v_zw;\n", compat.varying_vs);
 		}
-
-		// Varying bebas v_1..v_4 (highp vec4). Default 0 dan tidak mengubah render apa pun.
-		// Isi dan pakai sesukamu dengan mengedit dump vs_*.glsl dan fs_*.glsl secara manual
-		// (misalnya v_1 = vec4(worldnormal, 1.0) sebagai flag, v_2 = vec4(worldpos, 0.0), dst).
-		WRITE(p, "%s highp vec4 v_1;\n", compat.varying_vs);
-		WRITE(p, "%s highp vec4 v_2;\n", compat.varying_vs);
-		WRITE(p, "%s highp vec4 v_3;\n", compat.varying_vs);
-		WRITE(p, "%s highp vec4 v_4;\n", compat.varying_vs);
-		if (useFlagVarying) {
-			// Urutan qualifier harus: flat out <precision> int. Precision sama dengan di FS.
-			WRITE(p, "flat %s mediump int flag;\n", compat.varying_vs);
-		}
 	}
 
 	if (useHWTransform) {
 		WRITE(p, "vec3 normalizeOr001(vec3 v) {\n");
 		WRITE(p, "   float len2 = dot(v, v);\n");
 		WRITE(p, "   return len2 == 0.0 ? vec3(0.0, 0.0, 1.0) : (v * inversesqrt(len2));\n");
+		WRITE(p, "}\n");
+		WRITE(p, "vec3 normalizeOr000(vec3 v) {\n");
+		WRITE(p, "   float len2 = dot(v, v);\n");
+		WRITE(p, "   return len2 == 0.0 ? splat3(0.0) : (v * inversesqrt(len2));\n");
+		WRITE(p, "}\n");
+		// The GE's pow for lighting: 1 for e <= 0, else 0 for x <= 0. Otherwise exp2(e * log2(x)) with
+		// log2 and exp2 each a straight line between powers of two, which is what reading a float's
+		// bits as an integer gives: exponent plus mantissa, scaled by 2^23. Without integers, a true
+		// pow is close enough.
+		WRITE(p, "float pspPow(float x, float e) {\n");
+		if (compat.bitwiseOps) {
+			// 1065353216 is 1.0's bits. Not written in hex: HLSL makes 0x3F800000 a uint, and the subtraction wraps.
+			WRITE(p, "   float t = max(e, 0.0) * float(floatBitsToInt(max(x, 1e-30)) - 1065353216) + 1065353216.0;\n");
+			WRITE(p, "   return x > 0.0 || e <= 0.0 ? intBitsToFloat(int(max(t, 0.0))) : 0.0;\n");
+		} else {
+			WRITE(p, "   return e <= 0.0 ? 1.0 : pow(max(x, 0.0), e);\n");
+		}
 		WRITE(p, "}\n");
 	}
 
@@ -582,6 +488,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			if (lmode && !useHWTransform) {
 				WRITE(p, "  vec3 color1 = In.color1;\n");
 			}
+		}
+		if (cpuLit) {
+			WRITE(p, "  vec4 cpulit0 = In.cpulit0;\n");
+			WRITE(p, "  vec4 cpulit1 = In.cpulit1;\n");
 		}
 		if (hasNormal) {
 			WRITE(p, "  vec3 normal = In.normal;\n");
@@ -610,20 +520,11 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  %sv_color1 = color1;\n", compat.vsOutPrefix);
 		}
 		WRITE(p, "  %sv_fogdepth = fog;\n", compat.vsOutPrefix);
-		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			WRITE(p, "  %sv_1 = vec4(0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_2 = vec4(0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_3 = vec4(0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
-			if (useFlagVarying) {
-				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
-			}
-		}
 
 		// If non-through, the viewport has already been applied here.
 		WRITE(p, "  vec4 outPos = position;\n");
 
-		if (fsMinmaxDiscard || fsDepthClamp) {
+		if (fsMinmaxDiscard) {
 			WRITE(p, "  %sv_zw = vec2(outPos.z * outPos.w, outPos.w);\n", compat.vsOutPrefix);
 		}
 	} else {
@@ -634,34 +535,22 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		} else {
 			WRITE(p, "  mediump vec3 worldnormal = normalizeOr001(mul(vec4(0.0, 0.0, %s1.0, 0.0), u_world).xyz);\n", flipNormal ? "-" : "");
 		}
-
-		WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
-		if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-			// Normal khusus efek (TERPISAH dari worldnormal yang dipakai lighting PSP, jadi emulasi
-			// lighting tidak berubah). Bedanya dengan worldnormal:
-			//  - presisi highp (worldnormal mediump -> di Mali/Adreno bisa dihitung fp16)
-			//  - pakai normal matrix yang benar (cofactor dari u_world), jadi tetap akurat
-			//    walau world matrix punya non-uniform scale / mirror
-			// Tanpa normal di vertex (DUNIA, flag 2): normal dihitung per-pixel di FS (getFxNormal).
-			WRITE(p, "  highp vec3 fxRawN = %s;\n", hasNormal ? (flipNormal ? "-normal" : "normal") : (flipNormal ? "vec3(0.0, 0.0, -1.0)" : "vec3(0.0, 0.0, 1.0)"));
-			WRITE(p, "  highp mat3 fxW = mat3(u_world);\n");
-			WRITE(p, "  highp mat3 fxNM = mat3(cross(fxW[1], fxW[2]), cross(fxW[2], fxW[0]), cross(fxW[0], fxW[1]));\n");
-			WRITE(p, "  highp vec3 fxNormal = normalizeOr001(fxNM * fxRawN);\n");
-			WRITE(p, "  if (dot(fxW[0], fxNM[0]) < 0.0) fxNormal = -fxNormal;\n");  // koreksi tanda kalau matrix ter-mirror
-			// v_1 = normal VIEW-SPACE (xyz, w = 0): dunia -> view dengan u_view, jadi efek ikut kamera
-			//       (normal dunia tidak berubah saat kamera bergerak, normal view-space berubah).
-			// v_2 = posisi dunia
-			// v_3 = posisi view-space (untuk normal turunan di FS dan arah ke kamera)
-			// v_4 = bebas (0)
-			WRITE(p, "  %sv_1 = vec4(normalizeOr001(mul(vec4(fxNormal, 0.0), u_view).xyz), 0.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_2 = vec4(worldpos, 1.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_3 = vec4(viewPos.xyz, 1.0);\n", compat.vsOutPrefix);
-			WRITE(p, "  %sv_4 = vec4(0.0);\n", compat.vsOutPrefix);
-			if (useFlagVarying) {
-				WRITE(p, "  %sflag = %d;\n", compat.vsOutPrefix, vsFlag);
+		if (enableLighting || doShadeMapping) {
+			// The viewer is at infinity along view space +z: in world space, the view matrix's third column.
+			if (compat.shaderLanguage == HLSL_D3D11) {
+				WRITE(p, "  mediump vec3 viewDir = normalizeOr001(vec3(u_view[0].z, u_view[1].z, u_view[2].z));\n");
+			} else {
+				WRITE(p, "  mediump vec3 viewDir = normalizeOr001(u_view[2].xyz);\n");
 			}
 		}
-		if (useSimpleStereo) {
+
+		if (useSimpleStereo && gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
+			// Each eye's view comes from the headset (multiview, Vulkan).
+			WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), gl_ViewIndex == 0 ? u_view : u_viewR).xyz, 1.0);\n");
+		} else {
+			WRITE(p, "  vec4 viewPos = vec4(mul(vec4(worldpos, 1.0), u_view).xyz, 1.0);\n");
+		}
+		if (useSimpleStereo && !gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 			float ipd = 0.065f;
 			float scale = 1.0f;
 			if (PSP_CoreParameter().compat.vrCompat().UnitsPerMeter > 0) {
@@ -674,6 +563,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 			WRITE(p, "  vec4 outPos = mul(u_proj_lens, viewPos);\n");
 			WRITE(p, "  vec4 orgPos = mul(u_proj, viewPos);\n");
+			// Preserve game depth before clipping and viewport conversion. The VR lens
+			// changes XY, but depth must still agree with through-mode draws and clears,
+			// and go through the viewport's Z scale (often negative on the PSP).
+			WRITE(p, "  outPos.z = orgPos.z * (outPos.w / orgPos.w);\n");
 		} else {
 			WRITE(p, "  vec4 outPos = mul(u_proj, viewPos);\n");
 		}
@@ -685,6 +578,11 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  if (outPos.z < -outPos.w) {\n");
 		WRITE(p, "    zClipped = true;\n");
 		WRITE(p, "  }\n");
+		if (fsDepthClamp) {
+			// For the rasterizer's Z below: 0 at the near plane, so it still clips there, and past W only beyond
+			// 65535 * W, so nothing else is clipped. The fragment shader writes the real depth.
+			WRITE(p, "  float nearPlaneZ = (outPos.z + outPos.w) * (1.0 / 65536.0);\n");
+		}
 		// Then we actually add the clip plane.
 		if (clipNearPlane) {
 			WRITE(p, "  %sgl_ClipDistance%s = outPos.z + outPos.w;\n", compat.vsOutPrefix, zClipPlaneSuffix);
@@ -702,7 +600,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  float recip = 1.0 / outPos.w;\n");
 		WRITE(p, "  outPos.xyz = (outPos.xyz * u_vpScale.xyz) * recip + u_vpOffset.xyz;\n");
 
-		if (fsMinmaxDiscard || fsDepthClamp) {
+		if (fsMinmaxDiscard) {
 			WRITE(p, "  %sv_zw = vec2(outPos.z * outPos.w, outPos.w);\n", compat.vsOutPrefix);
 		}
 
@@ -812,7 +710,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				p.C("      } else {\n");  // type must be 0x02 - GE_LIGHTTYPE_SPOT
 				p.F("        angle = dot(u_lightdir%s, toLight);\n", iStr);
 				p.F("        if (angle >= u_lightangle_spotCoef%s.x) {\n", iStr);
-				p.F("          lightScale = attenuation * (u_lightangle_spotCoef%s.y <= 0.0 ? 1.0 : pow(angle, u_lightangle_spotCoef%s.y));\n", iStr, iStr, iStr);
+				p.F("          lightScale = attenuation * pspPow(angle, u_lightangle_spotCoef%s.y);\n", iStr, iStr);
 				p.C("        } else {\n");
 				p.C("          lightScale = 0.0;\n");
 				p.C("        }\n");
@@ -822,17 +720,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				p.C("    }\n");
 				p.C("    ldot = dot(toLight, worldnormal);\n");
 				p.C("    if (comp == 0x2u) {\n");  // GE_LIGHTCOMP_ONLYPOWDIFFUSE
-				p.C("      ldot = u_matspecular.a > 0.0 ? pow(max(ldot, 0.0), u_matspecular.a) : 1.0;\n");
+				p.C("      ldot = pspPow(ldot, u_matspecular.a);\n");
 				p.C("    }\n");
 				p.F("    diffuse = (u_lightdiffuse%s * diffuseColor) * max(ldot, 0.0);\n", iStr);
 				p.C("    if (comp == 0x1u && ldot >= 0.0) {\n");  // do specular. note - must allow for the >= case, since the u_matspecular.a <= 0.0 case relies on it.
-				p.C("      if (u_matspecular.a > 0.0) {\n");
-				p.C("        vec3 halfVec = toLight + vec3(0.0, 0.0, 1.0);\n");
-				p.C("        float halfInvLen = inversesqrt(dot(halfVec, halfVec));\n");
-				p.C("        ldot = pow(max(dot(halfVec, worldnormal) * halfInvLen, 0.0), u_matspecular.a);\n");
-				p.C("      } else {\n");
-				p.C("        ldot = 1.0;\n");
-				p.C("      }\n");
+				p.C("      vec3 halfVec = toLight + viewDir;\n");
+				p.C("      float halfInvLen = inversesqrt(dot(halfVec, halfVec));\n");
+				p.C("      ldot = pspPow(dot(halfVec, worldnormal) * halfInvLen, u_matspecular.a);\n");
 				p.F("      lightSum1 += u_lightspecular%s * specularColor * ldot * lightScale;\n", iStr);
 				p.C("    }\n");
 				p.F("    lightSum0.rgb += (u_lightambient%s * ambientColor.rgb + diffuse) * lightScale;\n", iStr);
@@ -872,11 +766,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				if (poweredDiffuse) {
 					// pow(0.0, 0.0) may be undefined, but the PSP seems to treat it as 1.0.
 					// Seen in Tales of the World: Radiant Mythology (#2424.)
-					p.C("  if (u_matspecular.a > 0.0) {\n");
-					p.C("    ldot = pow(max(ldot, 0.0), u_matspecular.a);\n");
-					p.C("  } else {\n");
-					p.C("    ldot = 1.0;\n");
-					p.C("  }\n");
+					p.C("  ldot = pspPow(ldot, u_matspecular.a);\n");
 				}
 
 				const char *timesLightScale = " * lightScale";
@@ -893,7 +783,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				case GE_LIGHTTYPE_UNKNOWN:
 					p.F("  angle = dot(u_lightdir%s, toLight);\n", iStr, iStr);
 					p.F("  if (angle >= u_lightangle_spotCoef%s.x) {\n", iStr);
-					p.F("    lightScale = clamp(1.0 / dot(u_lightatt%s, vec3(1.0, distance, distSq)), 0.0, 1.0) * (u_lightangle_spotCoef%s.y <= 0.0 ? 1.0 : pow(max(angle, 0.0), u_lightangle_spotCoef%s.y));\n", iStr, iStr, iStr);
+					p.F("    lightScale = clamp(1.0 / dot(u_lightatt%s, vec3(1.0, distance, distSq)), 0.0, 1.0) * pspPow(angle, u_lightangle_spotCoef%s.y);\n", iStr, iStr);
 					p.C("  } else {\n");
 					p.C("    lightScale = 0.0;\n");
 					p.C("  }\n");
@@ -906,13 +796,9 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				p.F("  diffuse = (u_lightdiffuse%s * diffuseColor) * max(ldot, 0.0);\n", iStr);
 				if (doSpecular) {
 					p.C("  if (ldot >= 0.0) {\n");
-					p.C("    if (u_matspecular.a > 0.0) {\n");
-					p.C("      vec3 halfVec = toLight + vec3(0.0, 0.0, 1.0);\n");
-					p.C("      float halfInvLen = inversesqrt(dot(halfVec, halfVec));\n");
-					p.C("      ldot = pow(max(dot(halfVec, worldnormal) * halfInvLen, 0.0), u_matspecular.a);\n");
-					p.C("    } else {\n");
-					p.C("      ldot = 1.0;\n");
-					p.C("    }\n");
+					p.C("    vec3 halfVec = toLight + viewDir;\n");
+					p.C("    float halfInvLen = inversesqrt(dot(halfVec, halfVec));\n");
+					p.C("    ldot = pspPow(dot(halfVec, worldnormal) * halfInvLen, u_matspecular.a);\n");
 					p.C("    if (ldot > 0.0)\n");
 					p.F("      lightSum1 += u_lightspecular%s * specularColor * ldot %s;\n", iStr, timesLightScale);
 					p.C("  }\n");
@@ -937,6 +823,15 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 				} else {
 					WRITE(p, "  %sv_color0 = clamp(vec4(lightSum0.rgb + lightSum1, lightSum0.a), 0.0, 1.0);\n", compat.vsOutPrefix);
 				}
+			}
+			if (cpuLit) {
+				// Without lmode, the CPU summed the specular into cpulit0.
+				WRITE(p, "  if (cpulit1.a > 0.5) {\n");
+				WRITE(p, "    %sv_color0 = cpulit0;\n", compat.vsOutPrefix);
+				if (lmode) {
+					WRITE(p, "    %sv_color1 = cpulit1.rgb;\n", compat.vsOutPrefix);
+				}
+				WRITE(p, "  }\n");
 			}
 		} else {
 			// Lighting doesn't affect color.
@@ -1020,9 +915,31 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 						snprintf(ls0Str, sizeof(ls0Str), "%d", ls0);
 						snprintf(ls1Str, sizeof(ls1Str), "%d", ls1);
 					}
-					std::string lightFactor0 = StringFromFormat("(length(u_lightpos%s) == 0.0 ? worldnormal.z : dot(normalize(u_lightpos%s), worldnormal))", ls0Str, ls0Str);
-					std::string lightFactor1 = StringFromFormat("(length(u_lightpos%s) == 0.0 ? worldnormal.z : dot(normalize(u_lightpos%s), worldnormal))", ls1Str, ls1Str);
-					WRITE(p, "  %sv_texcoord = vec3(u_uvscaleoffset.xy * vec2(1.0 + %s, 1.0 + %s) * 0.5, 1.0);\n", compat.vsOutPrefix, lightFactor0.c_str(), lightFactor1.c_str());
+					// N.L with L the light vector as lighting sees it (zero stays zero), or the half vector
+					// if the light does specular. Whether lighting or the light is on doesn't matter.
+					auto shadeLight = [&](int ls, const char *lsStr, const char *name) {
+						if (shadeUberShader) {
+							p.F("  vec3 %s = u_lightpos%s;\n", name, lsStr);
+							p.F("  if (((u_lightControl >> 0x%02xu) & 0x3u) != 0x0u) %s = u_lightpos%s - worldpos;\n", 4 + 4 * ls + 2, name, lsStr);
+							p.F("  %s = normalizeOr000(%s);\n", name, name);
+							p.F("  if (((u_lightControl >> 0x%02xu) & 0x3u) == 0x1u) %s = normalizeOr000(%s + viewDir);\n", 4 + 4 * ls, name, name);
+							return;
+						}
+						GELightType type = static_cast<GELightType>(id.Bits(VS_BIT_LIGHT0_TYPE + 4 * ls, 2));
+						GELightComputation comp = static_cast<GELightComputation>(id.Bits(VS_BIT_LIGHT0_COMP + 4 * ls, 2));
+						if (type == GE_LIGHTTYPE_DIRECTIONAL) {
+							// Prenormalized.
+							p.F("  vec3 %s = u_lightpos%s;\n", name, lsStr);
+						} else {
+							p.F("  vec3 %s = normalizeOr000(u_lightpos%s - worldpos);\n", name, lsStr);
+						}
+						if (comp == GE_LIGHTCOMP_BOTH) {
+							p.F("  %s = normalizeOr000(%s + viewDir);\n", name, name);
+						}
+					};
+					shadeLight(ls0, ls0Str, "shadeL0");
+					shadeLight(ls1, ls1Str, "shadeL1");
+					WRITE(p, "  %sv_texcoord = vec3(u_uvscaleoffset.xy * vec2(1.0 + dot(shadeL0, worldnormal), 1.0 + dot(shadeL1, worldnormal)) * 0.5, 1.0);\n", compat.vsOutPrefix);
 				}
 				break;
 
@@ -1073,6 +990,17 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  %sgl_ClipDistance%s = u_minZmaxZ.y < 65535.0 ? (u_minZmaxZ.y - clipZFar) * outPos.w : 1.0;\n", compat.vsOutPrefix, maxZClipPlaneSuffix);
 	}
 
+	// Snap screen Z to 1/8 and W to 16 significant bits. Hardware and software transform (which
+	// does the matrices on the CPU) differ by a few ulps here, which is enough to fail an
+	// equal-depth GEQUAL test when a frame mixes the two, as with draws that cross the near plane
+	// on GPUs without cull distances (DBZ Tenkaichi Tag Team's outlines, Naruto's grass). This is
+	// for the two to agree, not PSP behavior. Z steps of a whole unit break decals (Star Wars Lethal
+	// Alliance).
+	WRITE(p, "  outPos.z = floor(outPos.z * 8.0 + 0.5) * 0.125;\n");
+	if (compat.bitwiseOps) {
+		WRITE(p, "  outPos.w = uintBitsToFloat((floatBitsToUint(outPos.w) + 128u) & 4294967040u);\n");
+	}
+
 	// Convert to NDC space, using the framebuffer offset and (inverse size * 2) stored in u_xywh.
 	WRITE(p, "  outPos.xy = (((outPos.xy + u_xywh.xy) * u_xywh.zw) - vec2(1.0, 1.0)) * outPos.w;\n");
 
@@ -1080,6 +1008,13 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		// Actually 15-bit. Truncate here fixes Afterburner (similarly to the min/max clipping above).
 		// Possibly this should only be 15-bit in transformed mode? Full 16 in through? needs hardware testing.
 		WRITE(p, "  outPos.z = floor(outPos.z * 0.5) * 2.0;\n");
+	}
+
+	if (fsDepthClamp) {
+		// After the rounding, so the fragment shader clamps the Z that hardware depth clamp would. With fsMinmaxDiscard
+		// too, this replaces its unrounded Z: the same for the max side, which rounds down anyway, and up to 2 off for
+		// the min one, which only meets the clamp when max is 65535.
+		WRITE(p, "  %sv_zw = vec2(outPos.z * outPos.w, outPos.w);\n", compat.vsOutPrefix);
 	}
 
 	// It seems that depth values of 65535.6 should survive. Seen in NBA2K12 for example.
@@ -1104,24 +1039,28 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  outPos.y *= -1.0;\n");
 	}
 
+	if (readUnusedLights) {
+		// Declaring the block isn't enough, it has to be read. The ambient alpha is never below zero.
+		WRITE(p, "  if (u_ambient.w < -1.0) outPos.x += 1.0;\n");
+	}
 	// We've named the output gl_Position in HLSL as well.
 	WRITE(p, "  %sgl_Position = outPos;\n", compat.vsOutPrefix);
 
 	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
-		// Z correction for the depth buffer
-		if (useHWTransform) {
-			WRITE(p, "  %sgl_Position.z = orgPos.z / abs(orgPos.w) * abs(outPos.w);\n", compat.vsOutPrefix);
-		}
-
 		// HUD scaling
 		WRITE(p, "  %sgl_Position.x *= u_scaleX;\n", compat.vsOutPrefix);
 		WRITE(p, "  %sgl_Position.y *= u_scaleY;\n", compat.vsOutPrefix);
 	}
 
 	if (fsDepthClamp) {
-		// Overwrite Z with a value that will not be clipped.
+		// Overwrite Z with a value that only the near plane clips.
 		// Then we will overwrite the Z in the fragment shader with the per-pixel value computed from the interpolated v_zw.
-		WRITE(p, "  %sgl_Position.z = (u_minZmaxZ.x + u_minZmaxZ.y) * (0.5 / 65536.0) * outPos.w;\n", compat.vsOutPrefix);
+		if (useHWTransform) {
+			WRITE(p, "  %sgl_Position.z = nearPlaneZ;\n", compat.vsOutPrefix);
+		} else {
+			// Software transform has clipped against the near plane already.
+			WRITE(p, "  %sgl_Position.z = (u_minZmaxZ.x + u_minZmaxZ.y) * (0.5 / 65536.0) * outPos.w;\n", compat.vsOutPrefix);
+		}
 	}
 
 	if (compat.depthMinusOneToOne) {
@@ -1134,11 +1073,5 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 		WRITE(p, "  return Out;\n");
 	}
 	WRITE(p, "}\n");
-#ifdef __VERTEXT_GLSL_FILE__
-	if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {
-		VsGlslReplace(&id, sizeof(id), buffer);
-	}
-#endif
-
 	return true;
 }
