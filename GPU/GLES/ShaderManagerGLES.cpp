@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <map>
 
 #include "Common/Data/Convert/SmallDataConvert.h"
@@ -68,6 +69,44 @@ Shader::Shader(GLRenderManager *render, const char *code, const std::string &des
 
 Shader::~Shader() {
 	render_->DeleteShader(shader);
+}
+
+// ---- Parameter efek (u_near / u_far) ----
+// Dibaca dari <glsl>/fx_params.txt, isinya dua angka: "near far" (contoh: 60 300).
+// File dicek ulang tiap ~1 detik, jadi bisa diubah saat game jalan tanpa build ulang.
+// Kalau file tidak ada / tidak valid, dipakai nilai default di bawah.
+#if !defined(GLSL_REPLACE_DIR) && defined(__ANDROID__)
+#define GLSL_REPLACE_DIR "/storage/emulated/0/PSP/glsl"
+#endif
+
+struct FxParams {
+	float nearV = 60.0f;
+	float farV = 300.0f;
+	int version = 0;
+	double lastCheck = -1000.0;
+};
+static FxParams g_fxParams;
+
+static void RefreshFxParams() {
+	const double now = time_now_d();
+	if (now - g_fxParams.lastCheck < 1.0)
+		return;
+	g_fxParams.lastCheck = now;
+
+#ifdef GLSL_REPLACE_DIR
+	Path dir = Path(std::string(GLSL_REPLACE_DIR));
+#else
+	Path dir = g_Config.memStickDirectory / std::string("glsl");
+#endif
+	std::ifstream in((dir / std::string("fx_params.txt")).ToString());
+	float n = 0.0f, f = 0.0f;
+	if (in.is_open() && (in >> n >> f) && f > n && n >= 0.0f) {
+		if (n != g_fxParams.nearV || f != g_fxParams.farV) {
+			g_fxParams.nearV = n;
+			g_fxParams.farV = f;
+			g_fxParams.version++;
+		}
+	}
 }
 
 LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, FShaderID FSID, Shader *fs, bool useHWTransform, bool preloading)
@@ -121,6 +160,9 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_blendFixB, "u_blendFixB" });
 	queries.push_back({ &u_fbotexSize, "u_fbotexSize" });
 	queries.push_back({ &u_NaN, "u_NaN" });
+	queries.push_back({ &u_time, "u_time" });
+	queries.push_back({ &u_near, "u_near" });
+	queries.push_back({ &u_far, "u_far" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -363,6 +405,30 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 	if (useVR) {
 		is2D = Is2DVRObject(gstate.projMatrix, gstate.isModeThrough());
 		flatScreen = IsFlatVRScene();
+	}
+
+	// u_near / u_far: juga di luar mekanisme dirty. Diupdate hanya kalau nilainya berubah
+	// (version naik) atau program ini baru dipakai pertama kali.
+	if (u_near != -1 || u_far != -1) {
+		RefreshFxParams();
+		if (fxParamsVersion_ != g_fxParams.version) {
+			fxParamsVersion_ = g_fxParams.version;
+			if (u_near != -1)
+				render_->SetUniformF(&u_near, 1, &g_fxParams.nearV);
+			if (u_far != -1)
+				render_->SetUniformF(&u_far, 1, &g_fxParams.farV);
+		}
+	}
+
+	// u_time: tidak lewat mekanisme dirty (nilainya berubah terus). Tiap program menyimpan
+	// nilai uniform-nya sendiri, jadi dicek per LinkedShader. Update dibatasi ~125x/detik.
+	if (u_time != -1) {
+		static const double timeStart = time_now_d();
+		const float t = (float)fmod(time_now_d() - timeStart, 4096.0);
+		if (t < lastTime_ || t - lastTime_ >= 0.008f) {
+			lastTime_ = t;
+			render_->SetUniformF(&u_time, 1, &t);
+		}
 	}
 
 	if (!dirty)
