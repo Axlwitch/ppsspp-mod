@@ -52,6 +52,10 @@ struct ShaderInfo {
 	// Depth-aware shader (e.g. depth of field). Not part of the present chain: it runs once per frame
 	// right before the HUD starts drawing, with color as sampler0/sampler1 and depth as sampler2.
 	bool useDepth;
+	// Frame interpolation: sampler0 = newest game frame, sampler2 = the game frame before it,
+	// u_interp = how far to move from the old frame to the new one (0..1). Must be the FIRST shader in a chain.
+	// Implies 60fps = True and OutputResolution = False (see PostShader.cpp).
+	bool interpolate;
 
 	struct Setting {
 		std::string name;

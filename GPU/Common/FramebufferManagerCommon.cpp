@@ -15,8 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <set>
-#include <string>
 #include <algorithm>
 #include <sstream>
 #include <cmath>
@@ -1729,7 +1727,7 @@ void FramebufferManagerCommon::PrepareCopyDisplayToOutput(const DisplayLayoutCon
 		int actualWidth = (vfb->bufferWidth * vfb->renderWidth) / vfb->width;
 		int actualHeight = (vfb->bufferHeight * vfb->renderHeight) / vfb->height;
 		presentation_->UpdateUniforms(textureCache_->VideoIsPlaying());
-		presentation_->SourceFramebuffer(vfb->fbo, actualWidth, actualHeight);
+		presentation_->SourceFramebuffer(vfb->fbo, actualWidth, actualHeight, reallyDirty);
 		presentation_->RunPostshaderPasses(config, flags, uvRotation, u0, v0, u1, v1);
 	}
 }
@@ -3769,15 +3767,7 @@ static void ApplyKillzoneFramebufferSplit(FramebufferHeuristicParams *params, in
 
 
 // Number of 3D (non-through) draws on a framebuffer before a through-mode draw is taken to be the start of the HUD.
-static constexpr int kDepthEffectMinSceneDraws = 1;
-
-// Show each DOF error only once, so the OSD doesn't spam every frame.
-static void DofShowErrorOnce(const char *msg) {
-	static std::set<std::string> shown;
-	if (shown.insert(msg).second) {
-		g_OSD.Show(OSDType::MESSAGE_ERROR, msg, 4.0f);
-	}
-}
+static constexpr int kDepthEffectMinSceneDraws = 6;
 
 bool FramebufferManagerCommon::ShouldApplyDepthEffect(VirtualFramebuffer *vfb, bool isThrough, bool isClear) {
 	if (!vfb || !vfb->fbo || dofDoneThisFrame_ || isClear || !presentation_->HasDepthShader())
@@ -3801,12 +3791,12 @@ bool FramebufferManagerCommon::ShouldApplyDepthEffect(VirtualFramebuffer *vfb, b
 void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	dofDoneThisFrame_ = true;
 	if (!vfb || !vfb->fbo || GetFramebufferLayers() > 1) {
-		DofShowErrorOnce("DOF: dilewati (stereo/vfb tidak valid)");
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: dilewati (stereo/vfb tidak valid)", 4.0f);
 		return;
 	}
 
 	if (!draw_->GetDeviceCaps().textureDepthSupported) {
-		DofShowErrorOnce("DOF: GPU tidak bisa membaca depth sebagai tekstur");
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak bisa membaca depth sebagai tekstur", 4.0f);
 		return;
 	}
 
@@ -3823,7 +3813,7 @@ void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	if (!dofTemp_) {
 		dofTemp_ = draw_->CreateFramebuffer({ w, h, 1, 1, 0, true, "dof_temp" });
 		if (!dofTemp_) {
-			DofShowErrorOnce("DOF: gagal membuat FBO sementara (color+depth)");
+			g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: gagal membuat FBO sementara (color+depth)", 4.0f);
 			return;
 		}
 	}
@@ -3837,7 +3827,7 @@ void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	} else if (caps.framebufferBlitSupported) {
 		draw_->BlitFramebuffer(vfb->fbo, 0, 0, w, h, dofTemp_, 0, 0, w, h, Draw::Aspect::COLOR_BIT, Draw::FB_BLIT_NEAREST, "DepthEffectBlitColor");
 	} else {
-		DofShowErrorOnce("DOF: GPU tidak mendukung salin/blit warna");
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak mendukung salin/blit warna", 4.0f);
 		return;
 	}
 
@@ -3851,7 +3841,7 @@ void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 	} else if (useBlit) {
 		draw_->BlitFramebuffer(vfb->fbo, 0, 0, w, h, dofTemp_, 0, 0, w, h, Draw::Aspect::DEPTH_BIT, Draw::FB_BLIT_NEAREST, "DepthEffectBlitDepth");
 	} else {
-		DofShowErrorOnce("DOF: GPU tidak mendukung salin depth");
+		g_OSD.Show(OSDType::MESSAGE_ERROR, "DOF: GPU tidak mendukung salin depth", 4.0f);
 		RebindFramebuffer("DepthEffect");
 		gstate_c.Dirty(DIRTY_ALL_RENDER_STATE);
 		return;
@@ -3864,6 +3854,15 @@ void FramebufferManagerCommon::ApplyDepthEffect(VirtualFramebuffer *vfb) {
 }
 
 void FramebufferManagerCommon::ResetDepthEffectFrame() {
+	// Status every ~120 emulated frames, so we can see why the effect does (not) run.
+	if (presentation_ && (++dofDbgFlips_ % 120) == 0) {
+		g_OSD.Show(OSDType::MESSAGE_INFO,
+			std::string("DOF dbg: shader=") + (presentation_->HasDepthShader() ? "1" : "0") +
+			" 3D=" + std::to_string(dof3DDraws_) +
+			" thru=" + std::to_string(dofDbgThrough_) +
+			" mism=" + std::to_string(dofDbgMismatch_) +
+			" applied=" + std::to_string(dofDbgApplied_), 4.0f);
+	}
 	dofDoneThisFrame_ = false;
 	dofVfb_ = nullptr;
 	dof3DDraws_ = 0;

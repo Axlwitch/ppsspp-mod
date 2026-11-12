@@ -166,6 +166,13 @@ void LoadPostShaderInfo(Draw::DrawContext *draw, const std::vector<Path> &direct
 					section.Get("60fps", &info.requires60fps);
 					section.Get("UsePreviousFrame", &info.usePreviousFrame);
 					section.Get("UseDepth", &info.useDepth);
+					section.Get("Interpolate", &info.interpolate);
+					if (info.interpolate) {
+						// Needs a present every vblank, and must run before scaling to the screen.
+						info.requires60fps = true;
+						info.outputResolution = false;
+						info.usePreviousFrame = false;
+					}
 
 					if (info.parent == "Off")
 						info.parent.clear();
