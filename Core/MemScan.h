@@ -87,6 +87,13 @@ public:
 	static bool Relocate(int idx, int *outMisses, uint32_t *outOld, uint32_t *outNew);
 	// Relokasi semua entri; mengembalikan jumlah yang berhasil.
 	static int RelocateAll();
+	// Simpan / muat daftar freeze ke file khusus (bukan CWCheat): <folder cheats>/<GAMEID>.freeze
+	// SaveToFile menimpa file. LoadFromFile menambah/menimpa entri di daftar; tiap entri dicek
+	// lewat signature, dipindah bila alamat bergeser, dan dinonaktifkan bila tidak ketemu.
+	// Mengembalikan jumlah entri terbaca (-1 = file tidak ada/gagal baca).
+	static std::string FilePath(const std::string &gameID);
+	static bool SaveToFile(const std::string &gameID);
+	static int LoadFromFile(const std::string &gameID, int *outMoved, int *outLost);
 };
 
 // ---------------------------------------------------------------------------

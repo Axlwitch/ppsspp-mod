@@ -5,6 +5,9 @@
 
 #include "Core/MemScan.h"
 #include "Core/MemMap.h"
+#include "Core/System.h"
+#include "Common/File/FileUtil.h"
+#include "Common/File/Path.h"
 #include "Core/MIPS/MIPS.h"
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/MIPS/MIPSDebugInterface.h"
@@ -431,6 +434,158 @@ int MemFreezer::RelocateAll() {
 			ok++;
 	}
 	return ok;
+}
+
+
+// ---------------------------------------------------------------------------
+// Simpan / muat freeze ke file (<folder cheats>/<GAMEID>.freeze)
+// Baris: F <addr> <size> <kind 0=nilai 1=lui> <nilai> <aktif> <signature hex, ?? = wildcard> <label>
+// ---------------------------------------------------------------------------
+static Path FreezeFilePath(const std::string &gameID) {
+	return GetSysDirectory(DIRECTORY_CHEATS) / (gameID + ".freeze");
+}
+
+std::string MemFreezer::FilePath(const std::string &gameID) {
+	return FreezeFilePath(gameID).ToString();
+}
+
+bool MemFreezer::SaveToFile(const std::string &gameID) {
+	if (gameID.empty())
+		return false;
+	std::vector<FreezeEntry> copy;
+	{
+		std::lock_guard<std::mutex> guard(g_freezeLock);
+		copy = g_freezes;
+	}
+	if (copy.empty())
+		return false;
+	File::CreateFullPath(GetSysDirectory(DIRECTORY_CHEATS));
+	FILE *f = File::OpenCFile(FreezeFilePath(gameID), "wb");
+	if (!f)
+		return false;
+	fprintf(f, "# PPSSPP freeze list v1\n# F addr size kind value enabled signature label\n");
+	for (const FreezeEntry &e : copy) {
+		std::string sig;
+		for (int16_t b : e.sig) {
+			char tmp[4];
+			if (b < 0) {
+				sig += "??";
+			} else {
+				snprintf(tmp, sizeof(tmp), "%02X", (unsigned)b & 0xFF);
+				sig += tmp;
+			}
+		}
+		if (sig.empty())
+			sig = "-";
+		std::string label = e.label;
+		for (char &ch : label) {
+			if (ch == '\n' || ch == '\r')
+				ch = ' ';
+		}
+		fprintf(f, "F %08X %d %d %X %d %s %s\n", e.addr, e.size, e.kind == HitKind::Lui ? 1 : 0,
+			e.value, e.enabled ? 1 : 0, sig.c_str(), label.c_str());
+	}
+	fclose(f);
+	return true;
+}
+
+// Jumlah byte signature yang beda bila entri berada di alamat a (-1 = di luar RAM).
+static int SigMissAt(const FreezeEntry &e, uint32_t a) {
+	if (a < SCAN_START + SIG_BEFORE)
+		return -1;
+	if (!Memory::IsValidRange(a - SIG_BEFORE, (uint32_t)e.sig.size()))
+		return -1;
+	int miss = 0;
+	for (size_t i = 0; i < e.sig.size(); i++) {
+		if (e.sig[i] >= 0 && Memory::ReadUnchecked_U8(a - SIG_BEFORE + (uint32_t)i) != (uint8_t)e.sig[i])
+			miss++;
+	}
+	return miss;
+}
+
+int MemFreezer::LoadFromFile(const std::string &gameID, int *outMoved, int *outLost) {
+	if (outMoved) *outMoved = 0;
+	if (outLost) *outLost = 0;
+	if (gameID.empty())
+		return -1;
+	FILE *f = File::OpenCFile(FreezeFilePath(gameID), "rb");
+	if (!f)
+		return -1;
+
+	std::vector<FreezeEntry> loaded;
+	char line[1024];
+	while (fgets(line, sizeof(line), f)) {
+		if (line[0] != 'F')
+			continue;
+		unsigned addr = 0, value = 0;
+		int size = 0, kind = 0, en = 1, n = 0;
+		char sigbuf[256] = {};
+		if (sscanf(line, "F %x %d %d %x %d %255s %n", &addr, &size, &kind, &value, &en, sigbuf, &n) < 6)
+			continue;
+		if (size != 1 && size != 2 && size != 4)
+			continue;
+		FreezeEntry e;
+		e.addr = addr;
+		e.size = size;
+		e.kind = kind == 1 ? HitKind::Lui : HitKind::Value;
+		e.value = value;
+		e.enabled = en != 0;
+		if (strcmp(sigbuf, "-") != 0) {
+			size_t len = strlen(sigbuf);
+			for (size_t i = 0; i + 1 < len; i += 2) {
+				if (sigbuf[i] == '?')
+					e.sig.push_back(-1);
+				else
+					e.sig.push_back((int16_t)strtol(std::string(sigbuf + i, 2).c_str(), nullptr, 16));
+			}
+		}
+		if (n > 0) {
+			e.label = line + n;
+			while (!e.label.empty() && (e.label.back() == '\n' || e.label.back() == '\r'))
+				e.label.pop_back();
+		}
+		loaded.push_back(e);
+	}
+	fclose(f);
+
+	int moved = 0, lost = 0;
+	if (Memory::IsActive()) {
+		for (FreezeEntry &e : loaded) {
+			int fixedCount = 0;
+			for (int16_t b : e.sig)
+				if (b >= 0) fixedCount++;
+			const int allowed = fixedCount / 4;
+			int miss = SigMissAt(e, e.addr);
+			if (fixedCount >= 8 && miss >= 0 && miss <= allowed)
+				continue;  // alamat lama masih cocok
+			uint32_t na = 0;
+			int m = 0;
+			if (FindBySig(e, &na, &m)) {
+				e.addr = na;
+				moved++;
+			} else {
+				e.enabled = false;  // tidak ketemu: jangan menulis ke alamat yang mungkin salah
+				lost++;
+			}
+		}
+	}
+
+	std::lock_guard<std::mutex> guard(g_freezeLock);
+	for (const FreezeEntry &e : loaded) {
+		bool replaced = false;
+		for (FreezeEntry &old : g_freezes) {
+			if (old.addr == e.addr && old.size == e.size) {
+				old = e;
+				replaced = true;
+				break;
+			}
+		}
+		if (!replaced)
+			g_freezes.push_back(e);
+	}
+	if (outMoved) *outMoved = moved;
+	if (outLost) *outLost = lost;
+	return (int)loaded.size();
 }
 
 // ===========================================================================
