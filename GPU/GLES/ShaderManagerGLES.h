@@ -81,6 +81,12 @@ public:
 	int u_far = -1;
 	int fxParamsVersion_ = -1;
 
+	// Info draw untuk efek, diupdate tiap draw (lihat UpdateUniforms):
+	//   x = 1 kalau blend additive (dst factor = ONE), y = 1 kalau depth write nyala,
+	//   z/w = lebar/tinggi tekstur PSP asli (0 kalau tanpa tekstur)
+	int u_fxInfo = -1;
+	float lastFxInfo_[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+
 	int u_rasterOffset;
 	int u_minZmaxZ;
 

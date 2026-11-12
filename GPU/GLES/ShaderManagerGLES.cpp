@@ -163,6 +163,7 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_time, "u_time" });
 	queries.push_back({ &u_near, "u_near" });
 	queries.push_back({ &u_far, "u_far" });
+	queries.push_back({ &u_fxInfo, "u_fxInfo" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -428,6 +429,26 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		if (t < lastTime_ || t - lastTime_ >= 0.008f) {
 			lastTime_ = t;
 			render_->SetUniformF(&u_time, 1, &t);
+		}
+	}
+
+	// u_fxInfo: info draw untuk membedakan efek (additive / depth write / ukuran tekstur).
+	// Blend berubah antar draw walau programnya sama, jadi dicek tiap draw (bukan lewat dirty),
+	// tapi hanya dikirim ke GPU kalau nilainya berubah.
+	if (u_fxInfo != -1) {
+		const bool additive = gstate.isAlphaBlendEnabled() &&
+			gstate.getBlendEq() == GE_BLENDMODE_MUL_AND_ADD &&
+			gstate.getBlendFuncB() == GE_DSTBLEND_FIXB &&
+			(gstate.getFixB() & 0xFFFFFF) == 0xFFFFFF;
+		const bool tex = gstate.isTextureMapEnabled();
+		float info[4];
+		info[0] = additive ? 1.0f : 0.0f;
+		info[1] = gstate.isDepthWriteEnabled() ? 1.0f : 0.0f;
+		info[2] = tex ? (float)gstate.getTextureWidth(0) : 0.0f;
+		info[3] = tex ? (float)gstate.getTextureHeight(0) : 0.0f;
+		if (memcmp(info, lastFxInfo_, sizeof(info)) != 0) {
+			memcpy(lastFxInfo_, info, sizeof(info));
+			render_->SetUniformF(&u_fxInfo, 4, info);
 		}
 	}
 
