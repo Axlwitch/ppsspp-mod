@@ -81,11 +81,10 @@ public:
 	int u_far = -1;
 	int fxParamsVersion_ = -1;
 
-	// Info draw untuk efek, diupdate tiap draw (lihat UpdateUniforms):
-	//   x = 1 kalau blend additive (dst factor = ONE), y = 1 kalau depth write nyala,
-	//   z/w = lebar/tinggi tekstur PSP asli (0 kalau tanpa tekstur)
-	int u_fxInfo = -1;
-	float lastFxInfo_[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	// Slider efek dari menu Graphics (u_setting = slot 1-4, u_setting2 = slot 5-8), lihat GPU/Common/FxSettings.h.
+	int u_setting = -1;
+	int u_setting2 = -1;
+	int fxSettingsVersion_ = -1;
 
 	int u_rasterOffset;
 	int u_minZmaxZ;

@@ -38,6 +38,7 @@
 #include "Common/System/Display.h"
 #include "Common/System/OSD.h"
 #include "Common/VR/PPSSPPVR.h"
+#include "GPU/Common/FxSettings.h"
 
 #include "Common/Log.h"
 #include "Common/File/FileUtil.h"
@@ -163,7 +164,8 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_time, "u_time" });
 	queries.push_back({ &u_near, "u_near" });
 	queries.push_back({ &u_far, "u_far" });
-	queries.push_back({ &u_fxInfo, "u_fxInfo" });
+	queries.push_back({ &u_setting, "u_setting" });
+	queries.push_back({ &u_setting2, "u_setting2" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -421,6 +423,20 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		}
 	}
 
+	// u_setting / u_setting2: dikirim ulang hanya saat slider berubah (version naik) atau program baru dipakai.
+	if (u_setting != -1 || u_setting2 != -1) {
+		const int ver = FxSettings::Version();
+		if (fxSettingsVersion_ != ver) {
+			fxSettingsVersion_ = ver;
+			float v[FxSettings::kMax];
+			FxSettings::GetPacked(v);
+			if (u_setting != -1)
+				render_->SetUniformF(&u_setting, 4, v);
+			if (u_setting2 != -1)
+				render_->SetUniformF(&u_setting2, 4, v + 4);
+		}
+	}
+
 	// u_time: tidak lewat mekanisme dirty (nilainya berubah terus). Tiap program menyimpan
 	// nilai uniform-nya sendiri, jadi dicek per LinkedShader. Update dibatasi ~125x/detik.
 	if (u_time != -1) {
@@ -429,26 +445,6 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 		if (t < lastTime_ || t - lastTime_ >= 0.008f) {
 			lastTime_ = t;
 			render_->SetUniformF(&u_time, 1, &t);
-		}
-	}
-
-	// u_fxInfo: info draw untuk membedakan efek (additive / depth write / ukuran tekstur).
-	// Blend berubah antar draw walau programnya sama, jadi dicek tiap draw (bukan lewat dirty),
-	// tapi hanya dikirim ke GPU kalau nilainya berubah.
-	if (u_fxInfo != -1) {
-		const bool additive = gstate.isAlphaBlendEnabled() &&
-			gstate.getBlendEq() == GE_BLENDMODE_MUL_AND_ADD &&
-			gstate.getBlendFuncB() == GE_DSTBLEND_FIXB &&
-			(gstate.getFixB() & 0xFFFFFF) == 0xFFFFFF;
-		const bool tex = gstate.isTextureMapEnabled();
-		float info[4];
-		info[0] = additive ? 1.0f : 0.0f;
-		info[1] = gstate.isDepthWriteEnabled() ? 1.0f : 0.0f;
-		info[2] = tex ? (float)gstate.getTextureWidth(0) : 0.0f;
-		info[3] = tex ? (float)gstate.getTextureHeight(0) : 0.0f;
-		if (memcmp(info, lastFxInfo_, sizeof(info)) != 0) {
-			memcpy(lastFxInfo_, info, sizeof(info));
-			render_->SetUniformF(&u_fxInfo, 4, info);
 		}
 	}
 
