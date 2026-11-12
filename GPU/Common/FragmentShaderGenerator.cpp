@@ -538,6 +538,9 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 		// Batas jarak (view-space) untuk efek blur jauh, dari glsl/fx_params.txt (lihat ShaderManagerGLES).
 		WRITE(p, "uniform highp float u_near;\n");
 		WRITE(p, "uniform highp float u_far;\n");
+		// Pengaturan efek dari menu Graphics (glsl/fx_settings.txt): slot 1-4 = u_setting, 5-8 = u_setting2.
+		WRITE(p, "uniform highp vec4 u_setting;\n");
+		WRITE(p, "uniform highp vec4 u_setting2;\n");
 
 		if (compat.glslES30) {
 			// Normal VIEW-SPACE untuk efek (ikut kamera), selalu ter-normalisasi dan menghadap kamera.
