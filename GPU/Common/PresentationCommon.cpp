@@ -252,7 +252,6 @@ void PresentationCommon::CalculatePostShaderUniforms(int bufferWidth, int buffer
 	uniforms->setting[1] = GetShaderSettingValue(shaderInfo, 1, "SettingCurrentValue2");
 	uniforms->setting[2] = GetShaderSettingValue(shaderInfo, 2, "SettingCurrentValue3");
 	uniforms->setting[3] = GetShaderSettingValue(shaderInfo, 3, "SettingCurrentValue4");
-	uniforms->interp = interpT_;
 }
 
 static std::string ReadShaderSrc(const Path &filename) {
@@ -326,9 +325,6 @@ bool PresentationCommon::UpdatePostShader(const DisplayLayoutConfig &config) {
 		}
 	}
 
-	// Interpolation only works as the first pass, where the source is still the raw game frame.
-	useInterp_ = !postShaderInfo_.empty() && postShaderInfo_[0].interpolate;
-
 	if (postShaderPipelines_.empty()) {
 		// Only a depth shader was selected, nothing to run at present time.
 		usePostShader_ = false;
@@ -393,7 +389,6 @@ bool PresentationCommon::CompilePostShader(const ShaderInfo *shaderInfo, Draw::P
 		{ "u_setting", 5, 5, UniformType::FLOAT4, offsetof(PostShaderUniforms, setting) },
 		{ "u_video", 6, 6, UniformType::FLOAT1, offsetof(PostShaderUniforms, video) },
 		{ "u_vr", 7, 7, UniformType::FLOAT1, offsetof(PostShaderUniforms, vr) },
-		{ "u_interp", 8, 8, UniformType::FLOAT1, offsetof(PostShaderUniforms, interp) },
 	} };
 
 	Draw::Pipeline *pipeline = CreatePipeline({ vs, fs }, true, &postShaderDesc);
@@ -603,15 +598,6 @@ void PresentationCommon::DestroyPostShader() {
 	DoReleaseVector(postShaderPipelines_);
 	DoReleaseVector(postShaderFramebuffers_);
 	DoReleaseVector(previousFramebuffers_);
-	DoReleaseVector(interpFrames_);
-	useInterp_ = false;
-	interpActive_ = false;
-	interpW_ = interpH_ = 0;
-	interpCur_ = 0;
-	interpHaveCur_ = interpHavePrev_ = false;
-	interpSinceNew_ = 0;
-	interpInterval_ = 1;
-	interpT_ = 1.0f;
 	DoRelease(depthPipeline_);
 	delete depthShaderInfo_;
 	depthShaderInfo_ = nullptr;
@@ -656,10 +642,9 @@ void PresentationCommon::SourceTexture(Draw::Texture *texture, int bufferWidth, 
 	srcTexture_ = texture;
 	srcWidth_ = bufferWidth;
 	srcHeight_ = bufferHeight;
-	srcIsNewFrame_ = true;
 }
 
-void PresentationCommon::SourceFramebuffer(Draw::Framebuffer *fb, int bufferWidth, int bufferHeight, bool isNewFrame) {
+void PresentationCommon::SourceFramebuffer(Draw::Framebuffer *fb, int bufferWidth, int bufferHeight) {
 	fb->AddRef();
 
 	DoRelease(srcTexture_);
@@ -668,7 +653,6 @@ void PresentationCommon::SourceFramebuffer(Draw::Framebuffer *fb, int bufferWidt
 	srcFramebuffer_ = fb;
 	srcWidth_ = bufferWidth;
 	srcHeight_ = bufferHeight;
-	srcIsNewFrame_ = isNewFrame;
 }
 
 // Return value is if stereo binding succeeded.
@@ -739,70 +723,6 @@ void PresentationCommon::RunDepthShader(Draw::Framebuffer *src, Draw::Framebuffe
 	draw_->Draw(4, 0);
 }
 
-// Frame interpolation bookkeeping. Called once per present, before the post shader passes.
-//
-// With a "60fps" shader in the chain, sceDisplay flips every vblank, so a 30fps game gives us two
-// presents per game frame: one where srcIsNewFrame_ is true, and one where it's a repeat.
-// When game frame N arrives we show a point between N-1 and N, then N itself on the following present:
-//   present index since arrival (c) = 0, 1, ...   position t = (c + 1) / L, clamped to 1
-// where L is the number of presents between N-1 and N (L = 2 for a 30fps game).
-void PresentationCommon::UpdateInterpolation() {
-	interpActive_ = false;
-	interpT_ = 1.0f;
-	if (!useInterp_ || !srcFramebuffer_ || srcTexture_ || srcFramebuffer_->Layers() > 1)
-		return;
-
-	const Draw::DeviceCaps &caps = draw_->GetDeviceCaps();
-	if (!caps.framebufferCopySupported && !caps.framebufferBlitSupported)
-		return;
-
-	int w, h;
-	draw_->GetFramebufferDimensions(srcFramebuffer_, &w, &h);
-	if (interpFrames_.size() != 2 || interpW_ != w || interpH_ != h) {
-		DoReleaseVector(interpFrames_);
-		for (int i = 0; i < 2; ++i) {
-			Draw::Framebuffer *fbo = draw_->CreateFramebuffer({ w, h, 1, 1, 0, false, "interp_frame" });
-			if (!fbo) {
-				DoReleaseVector(interpFrames_);
-				return;
-			}
-			interpFrames_.push_back(fbo);
-		}
-		interpW_ = w;
-		interpH_ = h;
-		interpCur_ = 0;
-		interpHaveCur_ = false;
-		interpHavePrev_ = false;
-		interpSinceNew_ = 0;
-		interpInterval_ = 1;
-	}
-
-	if (srcIsNewFrame_ || !interpHaveCur_) {
-		interpInterval_ = interpSinceNew_ + 1;
-		interpSinceNew_ = 0;
-		interpHavePrev_ = interpHaveCur_;
-		interpCur_ ^= 1;
-
-		Draw::Framebuffer *dst = interpFrames_[interpCur_];
-		if (caps.framebufferCopySupported) {
-			draw_->CopyFramebufferImage(srcFramebuffer_, 0, 0, 0, 0, dst, 0, 0, 0, 0, w, h, 1, Draw::Aspect::COLOR_BIT, "InterpCopy");
-		} else {
-			draw_->BlitFramebuffer(srcFramebuffer_, 0, 0, w, h, dst, 0, 0, w, h, Draw::Aspect::COLOR_BIT, Draw::FB_BLIT_NEAREST, "InterpBlit");
-		}
-		interpHaveCur_ = true;
-	} else if (interpSinceNew_ < 1000) {
-		interpSinceNew_++;
-	}
-
-	// Only interpolate for steady, short intervals. 60fps games (L = 1), long stalls and loading
-	// screens just show the newest frame.
-	constexpr int kMaxInterval = 4;
-	if (interpHavePrev_ && interpInterval_ >= 2 && interpInterval_ <= kMaxInterval) {
-		interpT_ = std::min(1.0f, (float)(interpSinceNew_ + 1) / (float)interpInterval_);
-	}
-	interpActive_ = true;
-}
-
 void PresentationCommon::UpdateUniforms(bool hasVideo) {
 	hasVideo_ = hasVideo;
 }
@@ -841,13 +761,6 @@ void PresentationCommon::RunPostshaderPasses(const DisplayLayoutConfig &config, 
 	if (!srcTexture_ && !srcFramebuffer_) {
 		// Presenting blank, no need to run post shaders. But we did compute the output rect.
 		return;
-	}
-
-	if (usePostShader) {
-		UpdateInterpolation();
-	} else {
-		interpActive_ = false;
-		interpT_ = 1.0f;
 	}
 
 	// To make buffer updates easier, we use one array of verts.
@@ -945,24 +858,14 @@ void PresentationCommon::RunPostshaderPasses(const DisplayLayoutConfig &config, 
 	Draw::Framebuffer *previousFramebuffer = previousFramebuffers_.empty() ? nullptr : previousFramebuffers_[previousIndex_];
 
 	const auto performShaderPass = [&](const ShaderInfo *shaderInfo, Draw::Framebuffer *postShaderFramebuffer, Draw::Pipeline *postShaderPipeline, int vertsOffset) {
-		// Interpolation only applies to the first pass, which still reads the raw game frame.
-		const bool interpPass = interpActive_ && shaderInfo->interpolate && !postShaderOutput_;
-		if (interpPass) {
-			Draw::Framebuffer *newest = interpFrames_[interpCur_];
-			Draw::Framebuffer *oldest = interpFrames_[interpHavePrev_ ? (interpCur_ ^ 1) : interpCur_];
-			draw_->BindFramebufferAsTexture(newest, 0, Draw::Aspect::COLOR_BIT, 0);
-			draw_->BindFramebufferAsTexture(newest, 1, Draw::Aspect::COLOR_BIT, 0);
-			draw_->BindFramebufferAsTexture(oldest, 2, Draw::Aspect::COLOR_BIT, 0);
+		if (postShaderOutput_) {
+			draw_->BindFramebufferAsTexture(postShaderOutput_, 0, Draw::Aspect::COLOR_BIT, 0);
 		} else {
-			if (postShaderOutput_) {
-				draw_->BindFramebufferAsTexture(postShaderOutput_, 0, Draw::Aspect::COLOR_BIT, 0);
-			} else {
-				BindSource(0, false);
-			}
-			BindSource(1, false);
-			if (shaderInfo->usePreviousFrame)
-				draw_->BindFramebufferAsTexture(previousFramebuffer, 2, Draw::Aspect::COLOR_BIT, 0);
+			BindSource(0, false);
 		}
+		BindSource(1, false);
+		if (shaderInfo->usePreviousFrame)
+			draw_->BindFramebufferAsTexture(previousFramebuffer, 2, Draw::Aspect::COLOR_BIT, 0);
 
 		int nextWidth, nextHeight;
 		draw_->GetFramebufferDimensions(postShaderFramebuffer, &nextWidth, &nextHeight);
@@ -979,7 +882,7 @@ void PresentationCommon::RunPostshaderPasses(const DisplayLayoutConfig &config, 
 		Draw::SamplerState *sampler = useNearest || shaderInfo->isUpscalingFilter ? samplerNearest_ : samplerLinear_;
 		draw_->BindSamplerStates(0, 1, &sampler);
 		draw_->BindSamplerStates(1, 1, &sampler);
-		if (shaderInfo->usePreviousFrame || interpPass)
+		if (shaderInfo->usePreviousFrame)
 			draw_->BindSamplerStates(2, 1, &sampler);
 
 		draw_->BindVertexBuffer(vdata_, vertsOffset);

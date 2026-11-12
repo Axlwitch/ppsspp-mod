@@ -38,8 +38,6 @@ struct PostShaderUniforms {
 	float vr;
 	// Used on Direct3D9.
 	float gl_HalfPixel[4];
-	// Frame interpolation position, 0 = previous game frame, 1 = newest game frame.
-	float interp;
 };
 
 struct FRect {
@@ -136,8 +134,7 @@ public:
 	// One of these must be called every frame.
 	void SourceBlank();
 	void SourceTexture(Draw::Texture *texture, int bufferWidth, int bufferHeight);
-	// isNewFrame: the game produced this image since the last present (false = we are re-presenting it).
-	void SourceFramebuffer(Draw::Framebuffer *fb, int bufferWidth, int bufferHeight, bool isNewFrame = true);
+	void SourceFramebuffer(Draw::Framebuffer *fb, int bufferWidth, int bufferHeight);
 
 	void RunPostshaderPasses(const DisplayLayoutConfig &config, OutputFlags flags, int uvRotation, float u0, float v0, float u1, float v1);
 	void CopyToOutput(const DisplayLayoutConfig &config);
@@ -160,9 +157,6 @@ protected:
 	bool AllocateFramebuffer(int w, int h);
 
 	bool BindSource(int binding, bool bindStereo);
-
-	// Keeps the last two game frames and works out interpolation position for this present.
-	void UpdateInterpolation();
 
 	void GetCardboardSettings(const DisplayLayoutConfig &config, CardboardSettings *cardboardSettings) const;
 	void CalculatePostShaderUniforms(int bufferWidth, int bufferHeight, int targetWidth, int targetHeight, const ShaderInfo *shaderInfo, PostShaderUniforms *uniforms) const;
@@ -193,20 +187,6 @@ protected:
 	int srcWidth_ = 0;
 	int srcHeight_ = 0;
 	bool hasVideo_ = false;
-	bool srcIsNewFrame_ = true;
-
-	// Frame interpolation state (only used when the first shader in the chain has Interpolate = True).
-	bool useInterp_ = false;
-	bool interpActive_ = false;  // valid for the present currently being built
-	std::vector<Draw::Framebuffer *> interpFrames_;  // two owned copies of game frames
-	int interpW_ = 0;
-	int interpH_ = 0;
-	int interpCur_ = 0;  // index of the newest frame
-	bool interpHaveCur_ = false;
-	bool interpHavePrev_ = false;
-	int interpSinceNew_ = 0;  // presents since the newest game frame arrived
-	int interpInterval_ = 1;  // presents between the two newest game frames (2 = 30fps on a 60Hz present)
-	float interpT_ = 1.0f;
 
 	int pixelWidth_ = 0;
 	int pixelHeight_ = 0;
