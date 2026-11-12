@@ -38,6 +38,7 @@
 #include "Common/System/Display.h"
 #include "Common/System/OSD.h"
 #include "Common/VR/PPSSPPVR.h"
+#include "GPU/Common/FxSettings.h"
 
 #include "Common/Log.h"
 #include "Common/File/FileUtil.h"
@@ -164,6 +165,8 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	queries.push_back({ &u_near, "u_near" });
 	queries.push_back({ &u_far, "u_far" });
 	queries.push_back({ &u_fxInfo, "u_fxInfo" });
+	queries.push_back({ &u_setting, "u_setting" });
+	queries.push_back({ &u_setting2, "u_setting2" });
 
 	// Transform
 	queries.push_back({ &u_view, "u_view" });
@@ -418,6 +421,21 @@ void LinkedShader::UpdateUniforms(const ShaderID &vsid, const ShaderLanguageDesc
 				render_->SetUniformF(&u_near, 1, &g_fxParams.nearV);
 			if (u_far != -1)
 				render_->SetUniformF(&u_far, 1, &g_fxParams.farV);
+		}
+	}
+
+	// u_setting / u_setting2: slider efek dari menu Graphics (GPU/Common/FxSettings.h).
+	// Nilai dibandingkan langsung tiap draw, dikirim hanya kalau berubah atau program baru dipakai.
+	if (u_setting != -1 || u_setting2 != -1) {
+		float v[FxSettings::kMax];
+		FxSettings::GetPacked(v);
+		if (!fxSettingsPushed_ || memcmp(v, fxSettingsLast_, sizeof(v)) != 0) {
+			fxSettingsPushed_ = true;
+			memcpy(fxSettingsLast_, v, sizeof(v));
+			if (u_setting != -1)
+				render_->SetUniformF(&u_setting, 4, v);
+			if (u_setting2 != -1)
+				render_->SetUniformF(&u_setting2, 4, v + 4);
 		}
 	}
 
