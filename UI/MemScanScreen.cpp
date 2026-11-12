@@ -494,6 +494,26 @@ void MemScanScreen::CreateSettingsViews(UI::ViewGroup *left) {
 		});
 	}
 
+	if (MemFreezer::Count() > 0) {
+		left->Add(new Choice("Simpan semua freeze ke file (khusus game ini)"))->OnClick.Add([this](UI::EventParams &) {
+			if (MemFreezer::SaveToFile(gameID_))
+				g_status = StringFromFormat("%d freeze disimpan ke %s", MemFreezer::Count(), MemFreezer::FilePath(gameID_).c_str());
+			else
+				g_status = "Gagal menyimpan freeze.";
+			RecreateViews();
+		});
+	}
+	left->Add(new Choice("Muat freeze dari file"))->OnClick.Add([this](UI::EventParams &) {
+		int moved = 0, lost = 0;
+		int n = MemFreezer::LoadFromFile(gameID_, &moved, &lost);
+		if (n < 0)
+			g_status = "Belum ada file freeze untuk game ini.";
+		else
+			g_status = StringFromFormat("Dimuat %d freeze (dipindah: %d, tidak ketemu/nonaktif: %d).", n, moved, lost);
+		g_freezeSel = -1;
+		RecreateViews();
+	});
+
 	// ---- 5. Pantau akses CPU ----
 	g_recs = MemWatch::Snapshot();
 	left->Add(new ItemHeader(StringFromFormat("5. Pantau akses CPU%s (%d)", MemWatch::Active() ? " [AKTIF]" : "", (int)g_recs.size())));

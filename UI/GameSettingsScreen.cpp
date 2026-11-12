@@ -81,6 +81,7 @@
 #include "Core/HLE/sceUtility.h"
 #include "Core/Util/PortManager.h"
 #include "GPU/Common/PostShader.h"
+#include "GPU/Common/FxSettings.h"
 #include "GPU/GPU.h"
 
 #if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
@@ -521,6 +522,26 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 	if (deviceType != DEVICE_TYPE_VR) {
 		CheckBox *hwTransform = graphicsSettings->Add(new CheckBox(&g_Config.bHardwareTransform, gr->T("Hardware Transform")));
 		hwTransform->SetDisabledPtr(&g_Config.bSoftwareRendering);
+	}
+
+	if (GetGPUBackend() == GPUBackend::OPENGL) {
+		// Slider untuk u_setting / u_setting2 di shader game (glsl/fx_settings.txt).
+		FxSettings::Load();  // baca ulang definisi tiap layar dibuka, jadi edit file langsung terlihat
+		const std::vector<FxSettingDef> fxDefs = FxSettings::Defs();
+		if (!fxDefs.empty()) {
+			graphicsSettings->Add(new ItemHeader("Efek shader game"));
+			for (size_t i = 0; i < fxDefs.size(); i++) {
+				const FxSettingDef &d = fxDefs[i];
+				auto *slider = graphicsSettings->Add(new PopupSliderChoiceFloat(FxSettings::ValuePtr((int)i), d.minV, d.maxV, d.def, d.name, d.step, screenManager()));
+				slider->OnChange.Add([](UI::EventParams &) {
+					FxSettings::NotifyChanged();
+				});
+			}
+			graphicsSettings->Add(new Choice("Reset efek shader ke default"))->OnClick.Add([this](UI::EventParams &) {
+				FxSettings::ResetToDefaults();
+				RecreateViews();
+			});
+		}
 	}
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Texture upscaling")));
